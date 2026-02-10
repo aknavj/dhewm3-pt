@@ -1314,12 +1314,10 @@ DRAW_CUDA
 */
 
 #ifdef HAVE_CUDA
-
-void RB_CUDA_Init( void );
-void RB_CUDA_Shutdown( void );
-void RB_CUDA_DrawView( void );
-
-#endif // HAVE_CUDA
+	void RB_CUDA_Init( void );
+	void RB_CUDA_Shutdown( void );
+	void RB_CUDA_DrawView( void );
+#endif
 
 /*
 ============================================================

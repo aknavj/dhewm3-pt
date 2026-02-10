@@ -923,14 +923,16 @@ void RB_DrawView( const void *data ) {
 
 	RB_ShowOverdraw();
 
+	// render the scene, jumping to the hardware specific interaction renderers
 #ifdef HAVE_CUDA
 	extern idCVar r_cuDraw;
-	if (r_cuDraw.GetBool() && backEnd.viewDef->viewEntitys) {
+	if ( r_cuDraw.GetBool() && backEnd.viewDef->viewEntitys ) {
+		// Use CUDA renderer
 		RB_CUDA_DrawView();
 	} else
-#endif // HAVE_CUDA
+#endif
 	{
-		// render the scene, jumping to the hardware specific interaction renderers
+		// Use standard OpenGL renderer
 		RB_STD_DrawView();
 	}
 

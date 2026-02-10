@@ -12,11 +12,11 @@ extern idCVar r_cuDraw;
 /*
  */
 void RB_CUDA_Init() {
-    if (!r_cuDraw.GetBool()) {
+	if (!r_cuDraw.GetBool()) {
 		return;
 	}
 
-    if (!idCudaRenderer::IsAvailable()) {
+	if (!idCudaRenderer::IsAvailable()) {
 		common->Warning("CUDA renderer requested but CUDA is not available\n");
 		r_cuDraw.SetBool(false);
 		return;
@@ -40,7 +40,7 @@ void RB_CUDA_Init() {
 /*
  */
 void RB_CUDA_Shutdown() {
-    if (g_cuRenderer) {
+	if (g_cuRenderer) {
 		delete g_cuRenderer;
 		g_cuRenderer = NULL;
 	}
@@ -50,22 +50,49 @@ void RB_CUDA_Shutdown() {
  */
 void RB_CUDA_DrawView() {
 
-    if (!g_cuRenderer || !backEnd.viewDef) {
-        return;
-    }
+	if (!g_cuRenderer || !backEnd.viewDef) {
+		return;
+	}
 
-    // process engine view data and prepare for CUDA rendering
-    g_cuRenderer->BeginFrame();
-        // TODO
-    g_cuRenderer->EndFrame();
+	// process engine view data and prepare for CUDA rendering
+	g_cuRenderer->BeginFrame();
+	
+	for (int i = 0; i < backEnd.viewDef->numDrawSurfs; i++) {
+		const drawSurf_t* surf = backEnd.viewDef->drawSurfs[i];
+		if (!surf || !surf->geo) {
+			continue;
+		}
 
-    const renderView_t *renderView = &backEnd.viewDef->renderView;
-    g_cuRenderer->RenderView(renderView);
+		const srfTriangles_t* tri = surf->geo;
+		if (!tri->verts || !tri->indexes) {
+			continue;
+		}
 
-    // copy CUDA result into host-side pixel buffer
-    int width = glConfig.vidWidth;
+		// get entity transform (model matrix)
+		const float* modelMatrix = NULL;
+		if (surf->space) {
+			modelMatrix = surf->space->modelMatrix;
+		}
+
+		// add triangle data to CUDA renderer
+		g_cuRenderer->AddTriangle(
+			tri->verts,
+			tri->numVerts,
+			tri->indexes,
+			tri->numIndexes,
+			modelMatrix
+		);
+	}
+
+	g_cuRenderer->EndFrame();
+
+	const renderView_t *renderView = &backEnd.viewDef->renderView;
+	g_cuRenderer->RenderView(renderView);
+
+	// copy CUDA result into host-side pixel buffer
+	int width = glConfig.vidWidth;
 	int height = glConfig.vidHeight;
-    static unsigned char* pixels = NULL;
+	static unsigned char* pixels = NULL;
 	static size_t pixelsSize = 0;
 	size_t needed = (size_t)width * height * 4;
 	if (!pixels || pixelsSize < needed) {
@@ -76,7 +103,7 @@ void RB_CUDA_DrawView() {
 	
 	g_cuRenderer->CopyToBackbuffer(pixels, width, height);
 
-    // upload CUDA result to GL texture
+	// upload CUDA result to GL texture
 	qglClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	qglDisable(GL_DEPTH_TEST);
 	qglDisable(GL_BLEND);
