@@ -21,6 +21,8 @@ idCudaRenderer::idCudaRenderer() {
 	d_vertices = NULL;
 	d_triangles = NULL;
 	d_triIndices = NULL;
+	d_textures = NULL;
+	d_materials = NULL;
 	d_bvhNodes = NULL;
 
 	d_framebuffer = NULL;
@@ -183,6 +185,8 @@ void idCudaRenderer::Alloc() {
 	CUDA_CHECK_VOID(cudaMalloc(&d_vertices, MAX_TRIANGLES * 3 * sizeof(cudaVertex_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_triangles, MAX_TRIANGLES * sizeof(cudaTriangle_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_triIndices, MAX_TRIANGLES * sizeof(int)));
+	CUDA_CHECK_VOID(cudaMalloc(&d_materials, MAX_MATERIALS * sizeof(cudaMaterial_t)));
+	CUDA_CHECK_VOID(cudaMalloc(&d_textures, MAX_TEXTURES * sizeof(cudaTexture_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_bvhNodes, MAX_BVH_NODES * sizeof(cudaBVHNode_t)));
 	
 	return;
@@ -229,6 +233,25 @@ void idCudaRenderer::Free() {
 	if (d_bvhNodes) {
 		cudaFree(d_bvhNodes);
 		d_bvhNodes = NULL;
+	}
+
+	if (d_materials) {
+		cudaFree(d_materials);
+		d_materials = NULL;
+	}
+
+	if (d_textures) {
+		// free individual texture data
+		for (int i = 0; i < h_textures.Num(); i++) {
+			if (h_textures[i].data) {
+				cudaFree(h_textures[i].data);
+			}
+		}
+		cudaFree(d_textures);
+		d_textures = NULL;
+		h_textures.Clear();
+		h_texnums.Clear();
+		textureHash.Free();
 	}
 
 	if (timer_start) {
@@ -327,6 +350,8 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 		d_vertices,
 		d_triangles,
 		d_triIndices,
+		d_materials,
+		d_textures,
 		d_bvhNodes,
 		num_bvh_nodes,
 		d_framebuffer,

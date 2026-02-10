@@ -39,19 +39,43 @@
 
 #define TILE_SIZE 16
 #define MAX_TRIANGLES 1000000
+#define MAX_TEXTURES 1024
+#define MAX_MATERIALS 1024
 #define MAX_BVH_NODES (MAX_TRIANGLES * 2)
 
+/*
+ */
 struct cudaVertex_t {
 	float position[3];
 	float normal[3];
 	float texcoord[2];
 };
 
+/*
+ */
 struct cudaTriangle_t {
 	int vertexIndices[3];
+	int materialIndex;
 	float bounds[6];
 };
 
+/*
+ */
+struct cudaTexture_t {
+	int width;
+	int height;
+	unsigned char* data;  // RGBA8 data on GPU
+};
+
+/*
+ */
+struct cudaMaterial_t {
+    float albedo[3];
+    int albedoTexture;
+};
+
+/*
+ */
 struct cudaBVHNode_t {
 	float bounds[6];
 	int l_child;
@@ -60,11 +84,15 @@ struct cudaBVHNode_t {
 	int primitive_count;
 };
 
+/*
+ */
 struct cudaRay_t {
 	float origin[3];
 	float direction[3];
 };
 
+/*
+ */
 struct cudaHitInfo_t {
 	float position[3];
 	float normal[3];
@@ -87,10 +115,16 @@ public:
 	static bool		IsAvailable();
 	void			PrintDeviceInfo();
 
+    // texture management
+    int             AddMaterial(const idMaterial* material);
+    void            SetMaterial(int index, const idMaterial* material);
+    int             AddTexture(const idImage* image);
+
     // frame management
 	void			BeginFrame();
 	void			EndFrame();
-	void			AddTriangle(const idDrawVert* verts, int numVerts, const int* indices, int numIndices, const float* modelMatrix = NULL);
+	void			AddTriangle(const idDrawVert* verts, int numVerts, const int* indices,
+                                int numIndices, int materialIndex, const float* modelMatrix = NULL);
     void            FramePVStoBVH();
 
     // rendering
@@ -107,18 +141,29 @@ private:
     // CUDA memory
 	cudaVertex_t*	d_vertices;
 	cudaTriangle_t*	d_triangles;
+    int*			d_triIndices;
 	cudaBVHNode_t*	d_bvhNodes;
+    cudaMaterial_t*	d_materials;
 	float*			d_framebuffer;
 	unsigned char*	d_outputBuffer;
 
     // host memory
 	idList<cudaVertex_t>	h_vertices;
 	idList<cudaTriangle_t>	h_triangles;
+    idList<cudaMaterial_t>	h_materials;
 	idList<cudaBVHNode_t>	h_bvhNodes;
 	idList<int>				h_bvhTriIndices;
-	int*			d_triIndices;
 	unsigned char*	h_outputPixels;
 	size_t			h_outputPixelsSize;
+
+    // texture data    
+    idHashIndex             textureHash;    // texnum -> h_textures index
+    idList<cudaTexture_t>   h_textures;     // host-side texture data
+    idList<int>             h_texnums;      // GL texnum per h_textures entry
+    cudaTexture_t*          d_textures;     // GPU texture array
+
+    // material data
+
 
     // camera parameters
 	float			cam_pos[3];
@@ -162,6 +207,8 @@ void CUDA_LaunchRenderView(
 	const cudaVertex_t* vertices,
 	const cudaTriangle_t* triangles,
 	const int *triIndices,
+    const cudaMaterial_t* materials,
+    const cudaTexture_t* textures,
 	const cudaBVHNode_t* bvhNodes,
 	int numBVHNodes,
 	float* framebuffer,

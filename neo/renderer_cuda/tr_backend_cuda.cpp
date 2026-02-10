@@ -83,12 +83,18 @@ void RB_CUDA_DrawView() {
 			modelMatrix = surf->space->modelMatrix;
 		}
 
+        int materialIndex = 0;
+        if (surf->material) {
+            materialIndex = g_cuRenderer->AddMaterial(surf->material);
+        }
+
         // add triangle data to CUDA renderer
 		g_cuRenderer->AddTriangle(
 			tri->verts,
 			tri->numVerts,
 			tri->indexes,
 			tri->numIndexes,
+            materialIndex,
 			modelMatrix
 		);
 	}

@@ -16,9 +16,10 @@ idCudaRenderer::BeginFrame
 void idCudaRenderer::BeginFrame() {
 	h_vertices.Clear();
 	h_triangles.Clear();
+	h_materials.Clear();
 
 	need_reload = 1;
-
+	
 	return;
 }
 
@@ -32,6 +33,24 @@ void idCudaRenderer::EndFrame() {
 	num_vertices = h_vertices.Num();
 
 	BuildBVH();
+
+	// upload materials
+	if (h_materials.Num() > 0) {
+		if (r_cuDebug.GetBool()) {
+			common->Printf("idCudaRenderer::EndFrame(): Uploading %d materials to GPU (device ptr: 0x%p)\n", h_materials.Num(), d_materials);
+		}
+		CUDA_CHECK_VOID(cudaMemcpy(d_materials, h_materials.Ptr(), 
+			h_materials.Num() * sizeof(cudaMaterial_t), cudaMemcpyHostToDevice));
+	}
+
+	// upload textures
+	if (h_textures.Num() > 0) {
+		if (r_cuDebug.GetBool()) {
+			common->Printf("idCudaRenderer::EndFrame():Uploading %d textures to GPU (device ptr: 0x%p)\n", h_textures.Num(), d_textures);
+		}
+		CUDA_CHECK_VOID(cudaMemcpy(d_textures, h_textures.Ptr(), 
+			h_textures.Num() * sizeof(cudaTexture_t), cudaMemcpyHostToDevice));
+	}
 
 	CUDA_CHECK_VOID(cudaDeviceSynchronize());
 
@@ -50,7 +69,7 @@ void idCudaRenderer::EndFrame() {
 idCudaRenderer::AddTriangle
 ========================
 */
-void idCudaRenderer::AddTriangle(const idDrawVert* verts, int numVerts, const int* indices, int numIndices, const float* modelMatrix) {
+void idCudaRenderer::AddTriangle(const idDrawVert* verts, int numVerts, const int* indices, int numIndices, int materialIndex, const float* modelMatrix) {
 	
 	int vertexBase = h_vertices.Num();
 
@@ -80,6 +99,7 @@ void idCudaRenderer::AddTriangle(const idDrawVert* verts, int numVerts, const in
 		tri.vertexIndices[0] = vertexBase + indices[i + 0];
 		tri.vertexIndices[1] = vertexBase + indices[i + 1];
 		tri.vertexIndices[2] = vertexBase + indices[i + 2];
+		tri.materialIndex = materialIndex;
 
 		const cudaVertex_t& v0 = h_vertices[tri.vertexIndices[0]];
 		const cudaVertex_t& v1 = h_vertices[tri.vertexIndices[1]];
