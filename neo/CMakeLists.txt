@@ -266,6 +266,73 @@ else()
 	set(CURL_LIBRARY "")
 endif()
 
+
+# Optional CUDA support for path tracer
+if(CUDA_PATHTRACER)
+	# First try modern CMake CUDA support (CMake 3.8+)
+	if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.8")
+		include(CheckLanguage)
+		check_language(CUDA)
+		if(CMAKE_CUDA_COMPILER)
+			enable_language(CUDA)
+			set(HAVE_CUDA TRUE)
+			set(USE_NATIVE_CUDA TRUE)
+			message(STATUS "CUDA support enabled via native CMake CUDA")
+			
+			# Set CUDA standard (thrust/CUB in modern CUDA toolkits require C++17)
+			set(CMAKE_CUDA_STANDARD 17)
+			set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+			
+			# Set CUDA architectures
+			if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+				set(CMAKE_CUDA_ARCHITECTURES 50 60 70 75 80 86)
+			endif()
+			
+			# Find CUDAToolkit for linking libraries (CMake 3.17+)
+			if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.17")
+				find_package(CUDAToolkit REQUIRED)
+			endif()
+			
+			add_definitions(-DHAVE_CUDA)
+		else()
+			message(STATUS "CUDA compiler not found, path tracer will be disabled")
+			set(HAVE_CUDA FALSE)
+			set(CUDA_PATHTRACER OFF)
+		endif()
+	else()
+		# Fall back to FindCUDA for older CMake
+		find_package(CUDA 10.0 QUIET)
+		if(CUDA_FOUND)
+			set(HAVE_CUDA TRUE)
+			set(USE_NATIVE_CUDA FALSE)
+			message(STATUS "CUDA support enabled via FindCUDA module")
+			include_directories(${CUDA_INCLUDE_DIRS})
+			add_definitions(-DHAVE_CUDA)
+			
+			# Set NVCC flags
+			list(APPEND CUDA_NVCC_FLAGS "-std=c++11")
+			list(APPEND CUDA_NVCC_FLAGS "-use_fast_math")
+			list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_50,code=sm_50")
+			list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_60,code=sm_60")
+			list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_70,code=sm_70")
+			list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_75,code=sm_75")
+			
+			if(CMAKE_BUILD_TYPE MATCHES Debug)
+				list(APPEND CUDA_NVCC_FLAGS "-g" "-G")
+			else()
+				list(APPEND CUDA_NVCC_FLAGS "-O3")
+			endif()
+		else()
+			message(STATUS "CUDA not found, path tracer will be disabled")
+			set(HAVE_CUDA FALSE)
+			set(CUDA_PATHTRACER OFF)
+		endif()
+	endif()
+else()
+	message(STATUS "CUDA path tracer disabled by user")
+	set(HAVE_CUDA FALSE)
+endif()
+
 if(TRACY)
 	if(CMAKE_MAJOR_VERSION LESS 3 OR ( CMAKE_MAJOR_VERSION EQUAL 3 AND CMAKE_MINOR_VERSION LESS 11 ))
 		message(WARNING "To build with support for Tracy, CMake 3.11 or newer is required (for the FetchContent module)!")
@@ -662,6 +729,20 @@ function(add_globbed_headers SRCLIST PATHPREFIX)
 	file(GLOB_RECURSE tmp_hdrs RELATIVE "${CMAKE_SOURCE_DIR}" "${PATHPREFIX}/*.h")
 	set(${SRCLIST} ${tmp_hdrs} ${${SRCLIST}} PARENT_SCOPE)
 endfunction()
+
+
+# Add CUDA path tracer source files if enabled
+if(HAVE_CUDA)
+	list(APPEND src_renderer
+		renderer_cuda/cu_renderer.cpp
+		renderer_cuda/tr_backend_cuda.cpp
+	)
+	
+# CUDA kernel file - now using modular structure
+set(src_renderer_cuda
+	renderer_cuda/cu_renderer_main.cu
+)
+endif()
 
 add_globbed_headers(src_renderer "renderer")
 
@@ -1300,13 +1381,45 @@ if(HARDLINK_GAME)
 endif()# HARDLINK_GAME
 
 if(CORE)
-	add_executable(${DHEWM3BINARY} WIN32 MACOSX_BUNDLE
-		${src_core}
-		${src_sys_base}
-		${src_sys_core}
-		${src_imgui}
-		${src_editor_tools}
-	)
+	# Handle CUDA source files if enabled
+	if(HAVE_CUDA)
+		if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.8" AND CMAKE_CUDA_COMPILER)
+			# Modern CMake with native CUDA support
+			add_executable(${DHEWM3BINARY} WIN32 MACOSX_BUNDLE
+				${src_core}
+				${src_sys_base}
+				${src_sys_core}
+				${src_imgui}
+				${src_editor_tools}
+				${src_renderer_cuda}
+			)
+			
+			# Set CUDA properties
+			set_target_properties(${DHEWM3BINARY} PROPERTIES
+				CUDA_SEPARABLE_COMPILATION ON
+				CUDA_RESOLVE_DEVICE_SYMBOLS ON
+			)
+		else()
+			# Older CMake using FindCUDA
+			cuda_add_executable(${DHEWM3BINARY} WIN32 MACOSX_BUNDLE
+				${src_core}
+				${src_sys_base}
+				${src_sys_core}
+				${src_imgui}
+				${src_editor_tools}
+				${src_renderer_cuda}
+			)
+		endif()
+	else()
+		# No CUDA support
+		add_executable(${DHEWM3BINARY} WIN32 MACOSX_BUNDLE
+			${src_core}
+			${src_sys_base}
+			${src_sys_core}
+			${src_imgui}
+			${src_editor_tools}
+		)
+	endif()
 	
 	if(MSVC AND CMAKE_MAJOR_VERSION GREATER 3 OR ( CMAKE_MAJOR_VERSION EQUAL 3 AND CMAKE_MINOR_VERSION GREATER_EQUAL 6 ))
 		# CMake >= 3.6 supports setting the default project started for debugging (instead of trying to launch ALL_BUILD ...)
@@ -1333,6 +1446,28 @@ endif()
 		${SDLx_LIBRARY}
 		${sys_libs}
 	)
+
+	# Link CUDA libraries if enabled
+	if(HAVE_CUDA)
+		if(USE_NATIVE_CUDA)
+			# Modern CMake with CUDAToolkit
+			if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.17" AND TARGET CUDAToolkit::cudart)
+				target_link_libraries(${DHEWM3BINARY} CUDA::cudart CUDA::curand)
+			else()
+				# Fallback: manually find CUDA libraries
+				find_library(CUDA_RUNTIME_LIBRARY cudart HINTS ${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES})
+				find_library(CUDA_CURAND_LIBRARY curand HINTS ${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES})
+				if(CUDA_RUNTIME_LIBRARY AND CUDA_CURAND_LIBRARY)
+					target_link_libraries(${DHEWM3BINARY} ${CUDA_RUNTIME_LIBRARY} ${CUDA_CURAND_LIBRARY})
+				else()
+					message(WARNING "Could not find CUDA runtime libraries, linking may fail")
+				endif()
+			endif()
+		else()
+			# Old FindCUDA module
+			target_link_libraries(${DHEWM3BINARY} ${CUDA_LIBRARIES} ${CUDA_curand_LIBRARY})
+		endif()
+	endif()
 
 	if(NOT APPLE AND NOT WIN32)
 		install(TARGETS ${DHEWM3BINARY}

@@ -674,6 +674,9 @@ const int MAX_GUI_SURFACES	= 1024;		// default size of the drawSurfs list for gu
 
 typedef enum {
 	BE_ARB2,
+#ifdef HAVE_CUDA
+	BE_CUDA, // CUDA PT
+#endif // HAVE_CUDA
 	BE_BAD
 } backEndName_t;
 
@@ -1301,6 +1304,22 @@ void RB_StencilShadowPass( const drawSurf_t *drawSurfs );
 void RB_STD_DrawView( void );
 void RB_STD_FogAllLights( void );
 void RB_BakeTextureMatrixIntoTexgen( idPlane lightProject[3], const float textureMatrix[16] );
+
+/*
+============================================================
+
+DRAW_CUDA
+
+============================================================
+*/
+
+#ifdef HAVE_CUDA
+
+void RB_CUDA_Init( void );
+void RB_CUDA_Shutdown( void );
+void RB_CUDA_DrawView( void );
+
+#endif // HAVE_CUDA
 
 /*
 ============================================================
