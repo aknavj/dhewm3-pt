@@ -869,6 +869,11 @@ void R_InitOpenGL( void ) {
 	r_renderer.SetModified();
 	tr.SetBackEndRenderer();
 
+#ifdef HAVE_CUDA
+	// initialize CUDA path tracer if enabled
+	RB_CUDA_Init();
+#endif
+
 	// allocate the frame data, which may be more if smp is enabled
 	R_InitFrameData();
 

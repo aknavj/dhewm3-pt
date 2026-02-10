@@ -1305,6 +1305,20 @@ void RB_BakeTextureMatrixIntoTexgen( idPlane lightProject[3], const float textur
 /*
 ============================================================
 
+DRAW_CUDA
+
+============================================================
+*/
+
+#ifdef HAVE_CUDA
+	void RB_CUDA_Init( void );
+	void RB_CUDA_Shutdown( void );
+	void RB_CUDA_DrawView( void );
+#endif
+
+/*
+============================================================
+
 DRAW_*
 
 ============================================================
