@@ -686,6 +686,7 @@ if(HAVE_CUDA)
 	list(APPEND src_renderer
 		renderer_cuda/cu_renderer.cpp
 		renderer_cuda/cu_renderer_frame.cpp
+		renderer_cuda/cu_renderer_bvh.cpp
 		renderer_cuda/tr_backend_cuda.cpp
 	)
 

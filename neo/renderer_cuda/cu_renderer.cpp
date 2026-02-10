@@ -4,27 +4,12 @@
 #include "renderer_cuda/cu_renderer.h"
 #include <cuda_runtime.h>
 
-/*
-========================
-
-CUDA Renderer console vars
-
-========================
-*/
+// console variables
 idCVar r_cuDraw("r_cuDraw", "1", CVAR_RENDERER | CVAR_ARCHIVE, "Use CUDA renderer");
 idCVar r_cuDebug("r_cuDebug", "0", CVAR_RENDERER, "Show CUDA renderer debug info");
 idCVar r_cuRenderMode("r_cuRenderMode", "0", CVAR_RENDERER, "CUDA renderer mode");
 
-/*
-========================
-
-Global variables
-
-========================
-*/
-
 idCudaRenderer *g_cuRenderer = NULL;
-
 
 /*
 ========================
@@ -36,6 +21,7 @@ idCudaRenderer::idCudaRenderer() {
 	d_vertices = NULL;
 	d_triangles = NULL;
 	d_triIndices = NULL;
+	d_bvhNodes = NULL;
 
 	d_framebuffer = NULL;
 	d_outputBuffer = NULL;
@@ -47,11 +33,12 @@ idCudaRenderer::idCudaRenderer() {
 	cam_forward[0] = 1.0f; cam_forward[1] = cam_forward[2] = 0.0f;
 	cam_right[0] = cam_right[2] = 0.0f; cam_right[1] = 1.0f;
 	cam_up[0] = cam_up[1] = 0.0f; cam_up[2] = 1.0f;
-	fovX = 90.0f;
-	fovY = 90.0f;
+	fov_x = 90.0f;
+	fov_y = 90.0f;
 
 	num_triangles = 0;
 	num_vertices = 0;
+	num_bvh_nodes = 0;
 	need_reload = 0;
 
 	width = 0;
@@ -67,7 +54,7 @@ idCudaRenderer::idCudaRenderer() {
 
 /*
 ========================
-idCudaRenderer::idCudaRenderer
+idCudaRenderer::~idCudaRenderer
 ========================
 */
 idCudaRenderer::~idCudaRenderer() {
@@ -87,7 +74,7 @@ bool idCudaRenderer::IsAvailable() {
 	cudaError_t err = cudaGetDeviceCount(&deviceCount);
 	
 	if (err != cudaSuccess || deviceCount == 0) {
-		return false;
+		return 0;
 	}
 	
 	// check if device supports compute capability 3.0 or higher
@@ -95,15 +82,15 @@ bool idCudaRenderer::IsAvailable() {
 	cudaGetDeviceProperties(&prop, 0);
 	
 	if (prop.major < 3) {
-		return false;
+		return 0;
 	}
 	
-	return true;
+	return 1;
 }
 
 /*
 ========================
-idCudaRenderer::IsAvailable
+idCudaRenderer::PrintDeviceInfo
 ========================
 */
 void idCudaRenderer::PrintDeviceInfo() {
@@ -138,7 +125,7 @@ bool idCudaRenderer::Init(int w, int h) {
 
 	if (!IsAvailable()) {
 		common->Warning("idCudaPathTracer::Init(): No compatible CUDA device found\n");
-		return false;
+		return 0;
 	}
 
 	common->Printf("\n----- Init CUDA Path Tracer -----\n");
@@ -146,26 +133,22 @@ bool idCudaRenderer::Init(int w, int h) {
 	width = w;
 	height = h;
 
-	// initialize CUDA
 	CUDA_CHECK(cudaSetDevice(0));
 	
-	// print device info
 	cudaDeviceProp prop;
 	cudaGetDeviceProperties(&prop, 0);
 	
 	common->Printf("CUDA Device: %s\n", prop.name);
 	common->Printf("  Compute Capability: %d.%d\n", prop.major, prop.minor);
 
-	// allocate needed buffers
 	Alloc();
 
-	// create CUDA timing events
 	cudaEventCreate(&timer_start);
 	cudaEventCreate(&timer_stop);
 
 	common->Printf("\n\n");
 
-	return true;
+	return 1;
 }
 
 /*
@@ -175,7 +158,6 @@ idCudaRenderer::Shutdown
 */
 void idCudaRenderer::Shutdown() {
 
-	// free used buffers
 	Free();
 
 	cudaDeviceReset();
@@ -193,7 +175,7 @@ void idCudaRenderer::Alloc() {
 	CUDA_CHECK_VOID(cudaMalloc(&d_framebuffer, framebufferSize));
 	CUDA_CHECK_VOID(cudaMemset(d_framebuffer, 0, framebufferSize));
 	
-	// alloc output LDR RGBA8 buffer 
+	// alloc output LDR RGBA8 buffer
 	size_t outputSize = width * height * 4 * sizeof(unsigned char);
 	CUDA_CHECK_VOID(cudaMalloc(&d_outputBuffer, outputSize));
 
@@ -201,6 +183,7 @@ void idCudaRenderer::Alloc() {
 	CUDA_CHECK_VOID(cudaMalloc(&d_vertices, MAX_TRIANGLES * 3 * sizeof(cudaVertex_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_triangles, MAX_TRIANGLES * sizeof(cudaTriangle_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_triIndices, MAX_TRIANGLES * sizeof(int)));
+	CUDA_CHECK_VOID(cudaMalloc(&d_bvhNodes, MAX_BVH_NODES * sizeof(cudaBVHNode_t)));
 	
 	return;
 }
@@ -243,6 +226,11 @@ void idCudaRenderer::Free() {
 		d_triIndices = NULL;
 	}
 
+	if (d_bvhNodes) {
+		cudaFree(d_bvhNodes);
+		d_bvhNodes = NULL;
+	}
+
 	if (timer_start) {
 		cudaEventDestroy(timer_start);
 		timer_start = NULL;
@@ -261,6 +249,7 @@ idCudaRenderer::UpdateCamera
 ========================
 */
 void idCudaRenderer::UpdateCamera(const renderView_t* renderView) {
+
 	// extract camera parameters from renderView
 	cam_pos[0] = renderView->vieworg.x;
 	cam_pos[1] = renderView->vieworg.y;
@@ -281,8 +270,8 @@ void idCudaRenderer::UpdateCamera(const renderView_t* renderView) {
 	cam_up[1] = axis[2][1];
 	cam_up[2] = axis[2][2];
 	
-	fovX = renderView->fov_x;
-	fovY = renderView->fov_y;
+	fov_x = renderView->fov_x;
+	fov_y = renderView->fov_y;
 }
 
 /*
@@ -316,6 +305,14 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 			num_vertices * sizeof(cudaVertex_t), cudaMemcpyHostToDevice));
 		CUDA_CHECK_VOID(cudaMemcpy(d_triangles, h_triangles.Ptr(),
 			num_triangles * sizeof(cudaTriangle_t), cudaMemcpyHostToDevice));
+
+		if (num_bvh_nodes > 0) {
+			CUDA_CHECK_VOID(cudaMemcpy(d_bvhNodes, h_bvhNodes.Ptr(),
+				num_bvh_nodes * sizeof(cudaBVHNode_t), cudaMemcpyHostToDevice));
+			CUDA_CHECK_VOID(cudaMemcpy(d_triIndices, h_bvhTriIndices.Ptr(),
+				num_triangles * sizeof(int), cudaMemcpyHostToDevice));
+		}
+
 		need_reload = 0;
 	}
 
@@ -330,6 +327,8 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 		d_vertices,
 		d_triangles,
 		d_triIndices,
+		d_bvhNodes,
+		num_bvh_nodes,
 		d_framebuffer,
 		d_outputBuffer,
 		renderWidth,
@@ -339,8 +338,8 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 		cam_forward,
 		cam_right,
 		cam_up,
-		fovX,
-		fovY,
+		fov_x,
+		fov_y,
 		r_cuRenderMode.GetInteger()
 	);
 
@@ -373,7 +372,7 @@ void idCudaRenderer::CopyToBackbuffer(unsigned char* dest, int destWidth, int de
 		return;
 	}
 
-	// ensure persistent host buffer is large enough (realloc only when needed)
+	// ensure persistent host buffer is large enough
 	size_t needed = (size_t)renderWidth * renderHeight * 4;
 	if (!h_outputPixels || h_outputPixelsSize < needed) {
 		if (h_outputPixels) {
@@ -383,13 +382,12 @@ void idCudaRenderer::CopyToBackbuffer(unsigned char* dest, int destWidth, int de
 		h_outputPixelsSize = needed;
 	}
 	
-	// copy from GPU (at render resolution)
+	// copy from GPU 
 	CUDA_CHECK_VOID(cudaMemcpy(h_outputPixels, d_outputBuffer, 
 		needed * sizeof(unsigned char), cudaMemcpyDeviceToHost));
 	
 	// simple upscaling if render resolution differs from display resolution
 	if (renderWidth != destWidth || renderHeight != destHeight) {
-		// nearest neighbor upscaling
 		for (int y = 0; y < destHeight; y++) {
 			for (int x = 0; x < destWidth; x++) {
 				int srcX = (x * renderWidth) / destWidth;

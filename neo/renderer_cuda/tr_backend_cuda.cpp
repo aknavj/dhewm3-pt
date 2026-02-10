@@ -10,7 +10,10 @@
 extern idCVar r_cuDraw;
 
 /*
- */
+========================
+RB_CUDA_Init
+========================
+*/
 void RB_CUDA_Init() {
 	if (!r_cuDraw.GetBool()) {
 		return;
@@ -38,7 +41,10 @@ void RB_CUDA_Init() {
 }
 
 /*
- */
+========================
+RB_CUDA_Shutdown
+========================
+*/
 void RB_CUDA_Shutdown() {
 	if (g_cuRenderer) {
 		delete g_cuRenderer;
@@ -47,14 +53,17 @@ void RB_CUDA_Shutdown() {
 }
 
 /*
- */
+========================
+RB_CUDA_DrawView
+========================
+*/
 void RB_CUDA_DrawView() {
 
 	if (!g_cuRenderer || !backEnd.viewDef) {
 		return;
 	}
 
-	// process engine view data and prepare for CUDA rendering
+    // process engine view data and prepare for CUDA rendering
 	g_cuRenderer->BeginFrame();
 	
 	for (int i = 0; i < backEnd.viewDef->numDrawSurfs; i++) {
@@ -68,13 +77,13 @@ void RB_CUDA_DrawView() {
 			continue;
 		}
 
-		// get entity transform (model matrix)
+        // get entity transform
 		const float* modelMatrix = NULL;
 		if (surf->space) {
 			modelMatrix = surf->space->modelMatrix;
 		}
 
-		// add triangle data to CUDA renderer
+        // add triangle data to CUDA renderer
 		g_cuRenderer->AddTriangle(
 			tri->verts,
 			tri->numVerts,
@@ -89,7 +98,7 @@ void RB_CUDA_DrawView() {
 	const renderView_t *renderView = &backEnd.viewDef->renderView;
 	g_cuRenderer->RenderView(renderView);
 
-	// copy CUDA result into host-side pixel buffer
+    // copy CUDA result into host-side pixel buffer
 	int width = glConfig.vidWidth;
 	int height = glConfig.vidHeight;
 	static unsigned char* pixels = NULL;
@@ -103,7 +112,7 @@ void RB_CUDA_DrawView() {
 	
 	g_cuRenderer->CopyToBackbuffer(pixels, width, height);
 
-	// upload CUDA result to GL texture
+    // upload CUDA result to GL texture
 	qglClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	qglDisable(GL_DEPTH_TEST);
 	qglDisable(GL_BLEND);
