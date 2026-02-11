@@ -17,6 +17,7 @@ void idCudaRenderer::BeginFrame() {
 	h_vertices.Clear();
 	h_triangles.Clear();
 	h_materials.Clear();
+	h_lights.Clear();
 
 	need_reload = 1;
 
@@ -33,6 +34,12 @@ void idCudaRenderer::EndFrame() {
 	num_vertices = h_vertices.Num();
 
 	BuildBVH();
+
+	// upload lights
+	if (h_lights.Num() > 0) {
+		CUDA_CHECK_VOID(cudaMemcpy(d_lights, h_lights.Ptr(), 
+			h_lights.Num() * sizeof(cudaLight_t), cudaMemcpyHostToDevice));
+	}
 
 	// upload materials
 	if (h_materials.Num() > 0) {
@@ -58,6 +65,8 @@ void idCudaRenderer::EndFrame() {
 		common->Printf("idCudaRenderer::EndFrame():\n");
 		common->Printf("  Triangles: %d\n", num_triangles);
 		common->Printf("  Vertices: %d\n", num_vertices);
+		common->Printf("  Materials: %d\n", h_materials.Num());
+		common->Printf("  Lights: %d\n", h_lights.Num());
 		common->Printf("  Kernel: %.2f ms (%.1f FPS)\n", kernel_ms, kernel_fps);
 	}
 
@@ -82,10 +91,34 @@ void idCudaRenderer::AddTriangle(const idDrawVert* verts, int numVerts, const in
 			v.position[0] = modelMatrix[0] * x + modelMatrix[4] * y + modelMatrix[8] * z + modelMatrix[12];
 			v.position[1] = modelMatrix[1] * x + modelMatrix[5] * y + modelMatrix[9] * z + modelMatrix[13];
 			v.position[2] = modelMatrix[2] * x + modelMatrix[6] * y + modelMatrix[10] * z + modelMatrix[14];
+
+			// rotate normal by the 3x3 upper-left of modelMatrix (no translation)
+			float nx = verts[i].normal[0];
+			float ny = verts[i].normal[1];
+			float nz = verts[i].normal[2];
+			v.normal[0] = modelMatrix[0] * nx + modelMatrix[4] * ny + modelMatrix[8]  * nz;
+			v.normal[1] = modelMatrix[1] * nx + modelMatrix[5] * ny + modelMatrix[9]  * nz;
+			v.normal[2] = modelMatrix[2] * nx + modelMatrix[6] * ny + modelMatrix[10] * nz;
 		} else {
 			v.position[0] = verts[i].xyz[0];
 			v.position[1] = verts[i].xyz[1];
 			v.position[2] = verts[i].xyz[2];
+
+			v.normal[0] = verts[i].normal[0];
+			v.normal[1] = verts[i].normal[1];
+			v.normal[2] = verts[i].normal[2];
+		}
+
+		// normalize the normal
+		float nLen = sqrtf(v.normal[0] * v.normal[0] + v.normal[1] * v.normal[1] + v.normal[2] * v.normal[2]);
+		if (nLen > 1e-6f) {
+			v.normal[0] /= nLen;
+			v.normal[1] /= nLen;
+			v.normal[2] /= nLen;
+		} else {
+			v.normal[0] = 0.0f;
+			v.normal[1] = 0.0f;
+			v.normal[2] = 1.0f;
 		}
 
 		v.texcoord[0] = verts[i].st[0];
@@ -114,6 +147,31 @@ void idCudaRenderer::AddTriangle(const idDrawVert* verts, int numVerts, const in
 
 		h_triangles.Append(tri);
 	}
+
+	return;
+}
+
+/*
+========================
+idCudaRenderer::AddLight
+========================
+*/
+void idCudaRenderer::AddLight(const idVec3& position, const idVec3& color, float intensity, float radius) {
+
+	if (h_lights.Num() >= MAX_LIGHTS) {
+		return;
+	}
+
+	cudaLight_t light;
+	light.position[0] = position.x;
+	light.position[1] = position.y;
+	light.position[2] = position.z;
+	light.color[0] = color.x;
+	light.color[1] = color.y;
+	light.color[2] = color.z;
+	light.intensity = intensity;
+	light.radius = radius;
+	h_lights.Append(light);
 
 	return;
 }

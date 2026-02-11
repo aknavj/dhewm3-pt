@@ -23,6 +23,7 @@ idCudaRenderer::idCudaRenderer() {
 	d_triIndices = NULL;
 	d_textures = NULL;
 	d_materials = NULL;
+	d_lights = NULL;
 	d_bvhNodes = NULL;
 
 	d_framebuffer = NULL;
@@ -37,6 +38,10 @@ idCudaRenderer::idCudaRenderer() {
 	cam_up[0] = cam_up[1] = 0.0f; cam_up[2] = 1.0f;
 	fov_x = 90.0f;
 	fov_y = 90.0f;
+
+	prev_cam_pos[0] = prev_cam_pos[1] = prev_cam_pos[2] = 0.0f;
+	prev_cam_forward[0] = 1.0f; prev_cam_forward[1] = prev_cam_forward[2] = 0.0f;
+	accum_frame = 0;
 
 	num_triangles = 0;
 	num_vertices = 0;
@@ -187,6 +192,7 @@ void idCudaRenderer::Alloc() {
 	CUDA_CHECK_VOID(cudaMalloc(&d_triIndices, MAX_TRIANGLES * sizeof(int)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_materials, MAX_MATERIALS * sizeof(cudaMaterial_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_textures, MAX_TEXTURES * sizeof(cudaTexture_t)));
+	CUDA_CHECK_VOID(cudaMalloc(&d_lights, MAX_LIGHTS * sizeof(cudaLight_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_bvhNodes, MAX_BVH_NODES * sizeof(cudaBVHNode_t)));
 	
 	return;
@@ -252,6 +258,11 @@ void idCudaRenderer::Free() {
 		h_textures.Clear();
 		h_texnums.Clear();
 		textureHash.Free();
+	}
+
+	if (d_lights) {
+		cudaFree(d_lights);
+		d_lights = NULL;
 	}
 
 	if (timer_start) {
@@ -339,9 +350,28 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 		need_reload = 0;
 	}
 
-	// clear framebuffer before rendering
-	CUDA_CHECK_VOID(cudaMemset(d_framebuffer, 0, width * height * 4 * sizeof(float)));
+	// detect camera or scene changes to reset progressive accumulation
+	bool cameraChanged = false;
+	for (int i = 0; i < 3; i++) {
+		if (fabsf(cam_pos[i] - prev_cam_pos[i]) > 1e-4f ||
+			fabsf(cam_forward[i] - prev_cam_forward[i]) > 1e-4f) {
+			cameraChanged = true;
+			break;
+		}
+	}
+
+	// scene is rebuilt every frame (BeginFrame clears geometry), so need_reload indicates a scene change
+	if (cameraChanged || need_reload) {
+		accum_frame = 0;
+		CUDA_CHECK_VOID(cudaMemset(d_framebuffer, 0, width * height * 4 * sizeof(float)));
+	}
 	CUDA_CHECK_VOID(cudaMemset(d_outputBuffer, 0, width * height * 4 * sizeof(unsigned char)));
+
+	// save current camera for next frame comparison
+	for (int i = 0; i < 3; i++) {
+		prev_cam_pos[i] = cam_pos[i];
+		prev_cam_forward[i] = cam_forward[i];
+	}
 
 	// render the view using CUDA kernel
 	cudaEventRecord(timer_start);
@@ -352,6 +382,8 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 		d_triIndices,
 		d_materials,
 		d_textures,
+		d_lights,
+		h_lights.Num(),
 		d_bvhNodes,
 		num_bvh_nodes,
 		d_framebuffer,
@@ -365,8 +397,11 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 		cam_up,
 		fov_x,
 		fov_y,
-		r_cuRenderMode.GetInteger()
+		r_cuRenderMode.GetInteger(),
+		accum_frame
 	);
+
+	accum_frame++;
 
 	cudaEventRecord(timer_stop);
 

@@ -66,6 +66,7 @@ void RB_CUDA_DrawView() {
     // process engine view data and prepare for CUDA rendering
 	g_cuRenderer->BeginFrame();
 	
+    // Add all draw surfaces to CUDA renderer
 	for (int i = 0; i < backEnd.viewDef->numDrawSurfs; i++) {
 		const drawSurf_t* surf = backEnd.viewDef->drawSurfs[i];
 		if (!surf || !surf->geo) {
@@ -98,6 +99,35 @@ void RB_CUDA_DrawView() {
 			modelMatrix
 		);
 	}
+
+    // Add lights from the scene
+    for (viewLight_t* vLight = backEnd.viewDef->viewLights; vLight; vLight = vLight->next) {
+        
+        if (!vLight->lightDef) {
+			continue;
+		}
+
+        const idRenderLightLocal* light = vLight->lightDef;
+		const renderLight_t& parms = light->parms;
+
+        // use global (world-space) light origin from the viewLight
+        idVec3 origin = vLight->globalLightOrigin;
+		idVec3 color(
+			parms.shaderParms[SHADERPARM_RED],
+			parms.shaderParms[SHADERPARM_GREEN],
+			parms.shaderParms[SHADERPARM_BLUE]
+		);
+
+        float intensity = 1.0f;
+
+        // use the average of the lightRadius XYZ components as the effective radius
+        float radius = (parms.lightRadius.x + parms.lightRadius.y + parms.lightRadius.z) / 3.0f;
+        if (radius < 1.0f) {
+            radius = 300.0f; // fallback for projected lights
+        }
+
+        g_cuRenderer->AddLight(origin, color, intensity, radius);
+    }
 
 	g_cuRenderer->EndFrame();
 

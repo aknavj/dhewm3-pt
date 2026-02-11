@@ -41,6 +41,7 @@
 #define MAX_TRIANGLES 1000000
 #define MAX_TEXTURES 1024
 #define MAX_MATERIALS 1024
+#define MAX_LIGHTS 128
 #define MAX_BVH_NODES (MAX_TRIANGLES * 2)
 
 /*
@@ -72,6 +73,15 @@ struct cudaTexture_t {
 struct cudaMaterial_t {
     float albedo[3];
     int albedoTexture;
+};
+
+/*
+ */
+struct cudaLight_t {
+    float position[3];
+    float color[3];
+    float intensity;
+    float radius;
 };
 
 /*
@@ -130,6 +140,7 @@ public:
 	void			EndFrame();
 	void			AddTriangle(const idDrawVert* verts, int numVerts, const int* indices,
                                 int numIndices, int materialIndex, const float* modelMatrix = NULL);
+    void            AddLight(const idVec3& position, const idVec3& color, float intensity, float radius);
     void            FramePVStoBVH();
 
     // rendering
@@ -149,6 +160,7 @@ private:
     int*			d_triIndices;
 	cudaBVHNode_t*	d_bvhNodes;
     cudaMaterial_t*	d_materials;
+    cudaLight_t*	d_lights;
 	float*			d_framebuffer;
 	unsigned char*	d_outputBuffer;
 
@@ -156,6 +168,7 @@ private:
 	idList<cudaVertex_t>	h_vertices;
 	idList<cudaTriangle_t>	h_triangles;
     idList<cudaMaterial_t>	h_materials;
+    idList<cudaLight_t>		h_lights;
 	idList<cudaBVHNode_t>	h_bvhNodes;
 	idList<int>				h_bvhTriIndices;
 	unsigned char*          h_outputPixels;
@@ -177,6 +190,11 @@ private:
 	float			cam_up[3];
 	float			fov_x;
 	float			fov_y;
+
+	// previous camera state for accumulation invalidation
+	float			prev_cam_pos[3];
+	float			prev_cam_forward[3];
+	unsigned int	accum_frame;
 
     // geometry counts
 	int				num_triangles;
@@ -214,6 +232,8 @@ void CUDA_LaunchRenderView(
 	const int *triIndices,
     const cudaMaterial_t* materials,
     const cudaTexture_t* textures,
+    const cudaLight_t* lights,
+    int numLights,
 	const cudaBVHNode_t* bvhNodes,
 	int numBVHNodes,
 	float* framebuffer,
@@ -227,7 +247,8 @@ void CUDA_LaunchRenderView(
 	const float* cam_up,
 	float fov_x,
 	float fov_y,
-	int renderMode
+	int renderMode,
+	unsigned int frameNumber
 );
 
 #ifdef __cplusplus
