@@ -274,6 +274,15 @@ void idCudaRenderer::Free() {
 		timer_stop = NULL;
 	}
 
+	// clear the rest
+	h_materials.Clear();
+	h_lights.Clear();
+	h_vertices.Clear();
+	h_triangles.Clear();
+	h_bvhNodes.Clear();
+	h_bvhTriIndices.Clear();
+	materialEmission.Clear();
+
 	return;
 }
 

@@ -61,8 +61,14 @@ __device__  __forceinline__ void EvaluateMaterial(
 	const float* bitangent,
 	float* outAlbedo,
 	float* outNormal,
-	float* outSpecular
+	float* outSpecular,
+	float* outEmission
 ) {
+	// emission from ambient / self-illumination stages
+	outEmission[0] = mat.emission[0];
+	outEmission[1] = mat.emission[1];
+	outEmission[2] = mat.emission[2];
+
 	outAlbedo[0] = mat.albedo[0];
 	outAlbedo[1] = mat.albedo[1];
 	outAlbedo[2] = mat.albedo[2];

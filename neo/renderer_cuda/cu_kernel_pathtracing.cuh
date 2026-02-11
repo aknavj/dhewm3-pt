@@ -77,14 +77,12 @@ __global__ __forceinline__ void PathTracingKernel(
 	float throughR = 1.0f, throughG = 1.0f, throughB = 1.0f;
 
 	// sky ambient parameters
-	// Doom 3 uses Z-up; the sky gradient is based on ray direction Z component
-	const float SKY_INTENSITY   = 0.35f;
+	const float SKY_INTENSITY   = 0.08f;
 	const float SKY_ZENITH_R    = 0.15f, SKY_ZENITH_G = 0.18f, SKY_ZENITH_B = 0.30f;
 	const float SKY_HORIZON_R   = 0.20f, SKY_HORIZON_G = 0.20f, SKY_HORIZON_B = 0.22f;
 	const float SKY_GROUND_R    = 0.08f, SKY_GROUND_G = 0.07f, SKY_GROUND_B = 0.06f;
 
 	const int MAX_BOUNCES = 6;
-
 	for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
 
 		int hitIdx;
@@ -169,12 +167,24 @@ __global__ __forceinline__ void PathTracingKernel(
 		float pY = rayOrigY + rayDirY * hitT;
 		float pZ = rayOrigZ + rayDirZ * hitT;
 
-		// evaluate material (albedo, normal map, specular)
+		// evaluate material (albedo, normal map, specular, emission)
 		const cudaMaterial_t& mat = materials[tri.materialIndex];
 		float geoNormal[3] = { nx, ny, nz };
-		float albedo[3], shadingNormal[3], specColor[3];
+		float albedo[3], shadingNormal[3], specColor[3], emissive[3];
 		EvaluateMaterial(mat, textures, tu, tv, geoNormal, geoTangent, geoBitangent,
-						 albedo, shadingNormal, specColor);
+						 albedo, shadingNormal, specColor, emissive);
+
+		// accumulate emission weighted by current throughput
+		float emitR = emissive[0], emitG = emissive[1], emitB = emissive[2];
+		float emitLum = emitR * 0.2126f + emitG * 0.7152f + emitB * 0.0722f;
+		if (emitLum > 0.001f) {
+			colorR += throughR * emitR;
+			colorG += throughG * emitG;
+			colorB += throughB * emitB;
+
+			// strongly emissive surfaces terminate the path
+			if (emitLum > 0.5f) break;
+		}
 
 		// use perturbed shading normal for lighting
 		nx = shadingNormal[0];
@@ -294,7 +304,7 @@ __global__ __forceinline__ void PathTracingKernel(
 						projV = fmaxf(0.0f, fminf(1.0f, projV));
 
 						float texSample[4];
-						SampleTexture(textures[light.projectedTextureIndex], projU, projV, texSample);
+						SampleTexture(textures, light.projectedTextureIndex, projU, projV, texSample);
 						projR = texSample[0];
 						projG = texSample[1];
 						projB = texSample[2];
@@ -328,34 +338,32 @@ __global__ __forceinline__ void PathTracingKernel(
 						colorB += throughB * albB * lightColB * scale;
 					}
 				}
-
-				goto nee_done; // projected light handled per-channel above
 			}
 
 			// common path for point (type 0) and directional (type 1) lights
-			float NdotL = nx * lDirX + ny * lDirY + nz * lDirZ;
+			if (light.type == 0 || light.type == 1) {
+				float NdotL = nx * lDirX + ny * lDirY + nz * lDirZ;
 
-			if (NdotL > 0.0f && atten > 0.0f) {
-				float sOx = pX + nx * 0.1f;
-				float sOy = pY + ny * 0.1f;
-				float sOz = pZ + nz * 0.1f;
+				if (NdotL > 0.0f && atten > 0.0f) {
+					float sOx = pX + nx * 0.1f;
+					float sOy = pY + ny * 0.1f;
+					float sOz = pZ + nz * 0.1f;
 
-				bool inShadow = (numBVHNodes > 0) &&
-					TraceShadowRay(sOx, sOy, sOz, lDirX, lDirY, lDirZ, shadowDist,
-								   vertices, triangles, triIndices, bvhNodes, numBVHNodes);
+					bool inShadow = (numBVHNodes > 0) &&
+						TraceShadowRay(sOx, sOy, sOz, lDirX, lDirY, lDirZ, shadowDist,
+									   vertices, triangles, triIndices, bvhNodes, numBVHNodes);
 
-				if (!inShadow) {
-					// Lambertian BRDF = albedo / pi
-					// weight by numLights to compensate for random selection
-					float scale = NdotL * atten * (float)numLights / 3.14159265f;
+					if (!inShadow) {
+						// Lambertian BRDF = albedo / pi
+						// weight by numLights to compensate for random selection
+						float scale = NdotL * atten * (float)numLights / 3.14159265f;
 
-					colorR += throughR * albR * light.color[0] * scale;
-					colorG += throughG * albG * light.color[1] * scale;
-					colorB += throughB * albB * light.color[2] * scale;
+						colorR += throughR * albR * light.color[0] * scale;
+						colorG += throughG * albG * light.color[1] * scale;
+						colorB += throughB * albB * light.color[2] * scale;
+					}
 				}
 			}
-
-			nee_done:;
 		}
 
 		// cosine-weighted hemisphere sampling for indirect bounce

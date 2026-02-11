@@ -211,6 +211,9 @@ private:
     idList<int>             h_texnums;      // GL texnum per h_textures entry
     cudaTexture_t*          d_textures;     // GPU texture array
 
+	// light data
+	idList<idVec3>			materialEmission;
+
     // material data
 
 

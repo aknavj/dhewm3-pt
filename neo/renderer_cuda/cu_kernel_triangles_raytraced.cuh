@@ -251,6 +251,18 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 			albB *= tB;
 		}
 
+		// emission contribution from self-illuminating surfaces
+		float emitR = mat.emission[0], emitG = mat.emission[1], emitB = mat.emission[2];
+		float emitLum = emitR * 0.2126f + emitG * 0.7152f + emitB * 0.0722f;
+		if (emitLum > 0.001f) {
+			colorR += throughR * emitR;
+			colorG += throughG * emitG;
+			colorB += throughB * emitB;
+
+			// strongly emissive surfaces don't need further lighting
+			if (emitLum > 0.5f) break;
+		}
+
 		// view direction (points toward camera)
 		float vX = -rayDirX;
 		float vY = -rayDirY;

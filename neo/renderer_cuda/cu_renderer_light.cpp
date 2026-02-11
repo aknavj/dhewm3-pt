@@ -84,9 +84,7 @@ void idCudaRenderer::AddSpotLight(
 	}
 
     cudaLight_t light;
-	memset(&light, 0, sizeof(light));
-
-	light.type = 2; // projected / spot light
+	light.type = 0;
 	light.position[0] = position.x;
 	light.position[1] = position.y;
 	light.position[2] = position.z;
