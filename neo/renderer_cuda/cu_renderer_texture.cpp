@@ -21,15 +21,15 @@ int idCudaRenderer::AddTexture(const idImage* image) {
 		return -1;
 	}
 
-    // check if texture already cached by GL texnum
-    int key = (int)image->texnum;
-    for (int i = textureHash.First(key); i >= 0; i = textureHash.Next(i)) {
-        if (h_texnums[i] == key) {
-            return i;
-        }
-    }
+	// check if texture already cached by pointer
+	int key = (int)(intptr_t)image;
+	for (int i = textureHash.First(key); i >= 0; i = textureHash.Next(i)) {
+		if (h_texturePtrs[i] == image) {
+			return i;
+		}
+	}
 
-    if (h_textures.Num() >= MAX_TEXTURES) {
+	if (h_textures.Num() >= MAX_TEXTURES) {
 		common->Warning("idCudaRenderer::AddTexture(): Maximum texture count (%d) reached\n", MAX_TEXTURES);
 		return -1;
 	}
@@ -84,11 +84,12 @@ int idCudaRenderer::AddTexture(const idImage* image) {
 	// add to list and register in cache
 	int index = h_textures.Num();
 	h_textures.Append(tex);
-	h_texnums.Append(key);
+	h_texnums.Append((int)image->texnum);
+	h_texturePtrs.Append(image);
 	textureHash.Add(key, index);
 
     if (r_cuDebug.GetBool()) {
-        common->Printf("idCudaRenderer::AddTexture(): Texture %d: %dx%d\n", index, width, height);
+        common->Printf("idCudaRenderer::AddTexture(): Texture %d: %s %dx%d\n", index, image->imgName.c_str(), width, height);
     }
 
     return index;

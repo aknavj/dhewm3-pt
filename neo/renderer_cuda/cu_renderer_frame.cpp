@@ -16,8 +16,15 @@ idCudaRenderer::BeginFrame
 void idCudaRenderer::BeginFrame() {
 	h_vertices.Clear();
 	h_triangles.Clear();
-	h_materials.Clear();
 	h_lights.Clear();
+
+	// lights are rebuilt each frame but deduplicated within a frame via lightHash
+	lightHash.Free();
+	h_lightPtrs.Clear();
+	nextLightIndex = 0;
+
+	// materials persist across frames (cached via materialHash)
+	// only geometry and lights are rebuilt each frame
 
 	need_reload = 1;
 

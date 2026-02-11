@@ -208,14 +208,20 @@ private:
     // texture data    
     idHashIndex             textureHash;    // texnum -> h_textures index
     idList<cudaTexture_t>   h_textures;     // host-side texture data
+	idList<const idImage*>	h_texturePtrs;  // host-side texture pointers for hash lookup
     idList<int>             h_texnums;      // GL texnum per h_textures entry
     cudaTexture_t*          d_textures;     // GPU texture array
 
 	// light data
 	idList<idVec3>			materialEmission;
+	idHashIndex				lightHash;			// light ptr hash -> h_lights index
+	idList<intptr_t>		h_lightPtrs;		// host-side light pointer keys
+	int						nextLightIndex;		// next available light slot
 
     // material data
-
+    idHashIndex             materialHash;       // material ptr hash -> h_materials index
+    idList<const idMaterial*> h_materialPtrs;   // host-side material pointers
+    int                     nextMaterialIndex;  // next available material slot
 
     // camera parameters
 	float			cam_pos[3];

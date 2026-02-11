@@ -47,6 +47,8 @@ idCudaRenderer::idCudaRenderer() {
 	num_vertices = 0;
 	num_bvh_nodes = 0;
 	need_reload = 0;
+	nextMaterialIndex = 0;
+	nextLightIndex = 0;
 
 	width = 0;
 	height = 0;
@@ -257,6 +259,7 @@ void idCudaRenderer::Free() {
 		d_textures = NULL;
 		h_textures.Clear();
 		h_texnums.Clear();
+		h_texturePtrs.Clear();
 		textureHash.Free();
 	}
 
@@ -282,6 +285,12 @@ void idCudaRenderer::Free() {
 	h_bvhNodes.Clear();
 	h_bvhTriIndices.Clear();
 	materialEmission.Clear();
+	materialHash.Free();
+	h_materialPtrs.Clear();
+	nextMaterialIndex = 0;
+	lightHash.Free();
+	h_lightPtrs.Clear();
+	nextLightIndex = 0;
 
 	return;
 }

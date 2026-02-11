@@ -19,7 +19,7 @@ void idCudaRenderer::AddLight(
     int projTexIndex, const float* lightRadiusXYZ
 ) {
 
-	if (h_lights.Num() >= MAX_LIGHTS) {
+	if (nextLightIndex >= MAX_LIGHTS) {
         common->Warning("idCudaRenderer::AddLight(): Maximum light count (%d) reached, cannot add more lights\n", MAX_LIGHTS);
 		return;
 	}
@@ -62,7 +62,10 @@ void idCudaRenderer::AddLight(
     light.textureIndex = -1;
 	light.projectedTextureIndex = projTexIndex;
 
+	int index = nextLightIndex;
 	h_lights.Append(light);
+	h_lightPtrs.Append(0); // point lights have no unique engine pointer
+	nextLightIndex++;
 
 	return;
 }
@@ -78,7 +81,7 @@ void idCudaRenderer::AddSpotLight(
     const float* lightProject, int projTexIndex, const float* rightAxis, 
     const float* upAxis
 ) {
-    if (h_lights.Num() >= MAX_LIGHTS) {
+    if (nextLightIndex >= MAX_LIGHTS) {
         common->Warning("idCudaRenderer::AddSpotLight(): Maximum light count (%d) reached, cannot add more lights\n", MAX_LIGHTS);
         return;
 	}
@@ -131,7 +134,12 @@ void idCudaRenderer::AddSpotLight(
 		light.up[0] = light.up[1] = light.up[2] = 0.0f;
 	}
 	
+	int index = nextLightIndex;
+    
 	h_lights.Append(light);
+	h_lightPtrs.Append(0); // spot lights have no unique engine pointer
+
+	nextLightIndex++;
 }
 
 #endif // HAVE_CUDA
