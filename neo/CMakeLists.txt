@@ -686,8 +686,10 @@ if(HAVE_CUDA)
 	list(APPEND src_renderer
 		renderer_cuda/cu_renderer.cpp
 		renderer_cuda/cu_renderer_frame.cpp
+		renderer_cuda/cu_renderer_geometry.cpp
 		renderer_cuda/cu_renderer_texture.cpp
 		renderer_cuda/cu_renderer_material.cpp
+		renderer_cuda/cu_renderer_light.cpp
 		renderer_cuda/cu_renderer_bvh.cpp
 		renderer_cuda/tr_backend_cuda.cpp
 	)
@@ -695,7 +697,6 @@ if(HAVE_CUDA)
 	# CUDA kernel file
 	set(src_renderer_cuda
 		renderer_cuda/cu_renderer_main.cu
-		renderer_cuda/cu_renderer_material.cu
 	)
 
 	# Set CUDA compilation flags

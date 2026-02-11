@@ -33,7 +33,15 @@ int idCudaRenderer::AddMaterial(const idMaterial* material) {
     mat.albedo[0] = 1.0f;
     mat.albedo[1] = 1.0f;
     mat.albedo[2] = 1.0f;
+    mat.specular[0] = 0.0f;
+    mat.specular[1] = 0.0f;
+    mat.specular[2] = 0.0f;
+    mat.emission[0] = 0.0f;
+    mat.emission[1] = 0.0f;
+    mat.emission[2] = 0.0f;
     mat.albedoTexture = -1;
+    mat.normalTexture = -1;
+    mat.specularTexture = -1;
     h_materials.Append(mat);
 
     SetMaterial(index, material);
@@ -52,7 +60,12 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material) {
     mat.albedo[0] = 1.0f;
     mat.albedo[1] = 1.0f;
     mat.albedo[2] = 1.0f;
+    mat.specular[0] = 1.0f;
+    mat.specular[1] = 1.0f;
+    mat.specular[2] = 1.0f;
     mat.albedoTexture = -1;
+    mat.normalTexture = -1;
+    mat.specularTexture = -1;
 
     if (!material) {
         h_materials[index] = mat;
@@ -61,6 +74,8 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material) {
 
     // extract textures
     const shaderStage_t *diffuseStage = NULL;
+    const shaderStage_t *normalStage = NULL;
+    const shaderStage_t *specularStage = NULL;
 
     for (int i = 0; i < material->GetNumStages(); i++) {
         const shaderStage_t* stage = material->GetStage(i);
@@ -69,8 +84,13 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material) {
         switch (stage->lighting) {
             case SL_AMBIENT:
             case SL_BUMP:
+                normalStage = stage;
+                break;
             case SL_DIFFUSE:
                 diffuseStage = stage;
+                break;
+            case SL_SPECULAR:
+                specularStage = stage;
                 break;
             default:
                 break;
@@ -84,6 +104,22 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material) {
             common->Printf("idCudaRenderer::SetMaterial(): Material %d: %s\n", index, material->GetName());
         }
     }
+
+    bool hasNormal = (normalStage != NULL);
+    if (hasNormal) {
+        mat.normalTexture = AddTexture(normalStage->texture.image);
+        if (r_cuDebug.GetBool()) {
+            common->Printf("idCudaRenderer::SetMaterial(): Material %d: %s (normal map)\n", index, material->GetName());
+        }
+    }
+
+    bool hasSpecular = (specularStage != NULL);
+    if (hasSpecular) {
+        mat.specularTexture = AddTexture(specularStage->texture.image);
+        if (r_cuDebug.GetBool()) {
+            common->Printf("idCudaRenderer::SetMaterial(): Material %d: %s (specular map)\n", index, material->GetName());
+        }
+    }   
 
     h_materials[index] = mat;
 }

@@ -49,6 +49,8 @@
 struct cudaVertex_t {
 	float position[3];
 	float normal[3];
+	float tangent[3];
+	float bitangent[3];
 	float texcoord[2];
 };
 
@@ -72,7 +74,11 @@ struct cudaTexture_t {
  */
 struct cudaMaterial_t {
     float albedo[3];
+	float specular[3];
+	float emission[3];
     int albedoTexture;
+	int normalTexture;
+	int specularTexture;
 };
 
 /*
