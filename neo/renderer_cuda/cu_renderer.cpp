@@ -49,6 +49,7 @@ idCudaRenderer::idCudaRenderer() {
 	need_reload = 0;
 	nextMaterialIndex = 0;
 	nextLightIndex = 0;
+	needTextureFlush = false;
 
 	width = 0;
 	height = 0;

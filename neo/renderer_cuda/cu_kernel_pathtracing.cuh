@@ -49,15 +49,12 @@ __global__ __forceinline__ void PathTracingKernel(
 	// per-pixel RNG state seeded from pixel position and frame number
 	unsigned int rng = cupt_hash((unsigned int)(y * width + x) ^ cupt_hash(frameNumber + 1u));
 
-	// generate primary ray with sub-pixel jitter for anti-aliasing
+	// generate primary ray
 	float halfTanX = tanf(fov_x * 0.5f * 3.14159265f / 180.0f);
 	float halfTanY = tanf(fov_y * 0.5f * 3.14159265f / 180.0f);
 
-	float jx = cupt_random(rng); rng = cupt_hash(rng);
-	float jy = cupt_random(rng); rng = cupt_hash(rng);
-
-	float su = (2.0f * ((float)x + jx) / (float)width  - 1.0f) * halfTanX;
-	float sv = (2.0f * ((float)y + jy) / (float)height - 1.0f) * halfTanY;
+	float su = (2.0f * ((float)x + 0.5f) / (float)width  - 1.0f) * halfTanX;
+	float sv = (2.0f * ((float)y + 0.5f) / (float)height - 1.0f) * halfTanY;
 
 	float rayDirX = cameraForward[0] + su * cameraRight[0] + sv * cameraUp[0];
 	float rayDirY = cameraForward[1] + su * cameraRight[1] + sv * cameraUp[1];
@@ -77,12 +74,14 @@ __global__ __forceinline__ void PathTracingKernel(
 	float throughR = 1.0f, throughG = 1.0f, throughB = 1.0f;
 
 	// sky ambient parameters
-	const float SKY_INTENSITY   = 0.08f;
+	const float SKY_INTENSITY   = 0.15f;
 	const float SKY_ZENITH_R    = 0.15f, SKY_ZENITH_G = 0.18f, SKY_ZENITH_B = 0.30f;
-	const float SKY_HORIZON_R   = 0.20f, SKY_HORIZON_G = 0.20f, SKY_HORIZON_B = 0.22f;
-	const float SKY_GROUND_R    = 0.08f, SKY_GROUND_G = 0.07f, SKY_GROUND_B = 0.06f;
+	const float SKY_HORIZON_R   = 0.25f, SKY_HORIZON_G = 0.25f, SKY_HORIZON_B = 0.28f;
+	const float SKY_GROUND_R    = 0.10f, SKY_GROUND_G = 0.09f, SKY_GROUND_B = 0.08f;
 
 	const int MAX_BOUNCES = 6;
+	int alphaSkips = 0;
+	const int MAX_ALPHA_SKIPS = 8;
 	for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
 
 		int hitIdx;
@@ -171,8 +170,87 @@ __global__ __forceinline__ void PathTracingKernel(
 		const cudaMaterial_t& mat = materials[tri.materialIndex];
 		float geoNormal[3] = { nx, ny, nz };
 		float albedo[3], shadingNormal[3], specColor[3], emissive[3];
+		float alpha;
 		EvaluateMaterial(mat, textures, tu, tv, geoNormal, geoTangent, geoBitangent,
-						 albedo, shadingNormal, specColor, emissive);
+						 albedo, shadingNormal, specColor, emissive, alpha);
+
+		// alpha test: if perforated surface fails, skip through it
+		if (mat.coverage == 1 && alpha < mat.alphaTest && alphaSkips < MAX_ALPHA_SKIPS) {
+			// advance ray origin past the hit surface and re-trace
+			rayOrigX = pX + rayDirX * 0.01f;
+			rayOrigY = pY + rayDirY * 0.01f;
+			rayOrigZ = pZ + rayDirZ * 0.01f;
+			bounce--; // don't consume a bounce for alpha-tested skips
+			alphaSkips++;
+			continue;
+		}
+
+		// translucent with no explicit blend mode
+		if (mat.coverage == 2 && mat.blendMode == 0 && alpha < 0.5f && alphaSkips < MAX_ALPHA_SKIPS) {
+			rayOrigX = pX + rayDirX * 0.01f;
+			rayOrigY = pY + rayDirY * 0.01f;
+			rayOrigZ = pZ + rayDirZ * 0.01f;
+			bounce--;
+			alphaSkips++;
+			continue;
+		}
+
+		// translucent blending: sample blend texture, contribute color, continue ray
+		if (mat.coverage == 2 && mat.blendMode > 0 && alphaSkips < MAX_ALPHA_SKIPS) {
+			float blendR = mat.blendColor[0];
+			float blendG = mat.blendColor[1];
+			float blendB = mat.blendColor[2];
+			float blendA = mat.blendColor[3];
+
+			// sample blend texture if available
+			if (mat.blendTexture >= 0) {
+				float texSample[4];
+				SampleTexture(textures, mat.blendTexture, tu, tv, texSample);
+				blendR *= texSample[0];
+				blendG *= texSample[1];
+				blendB *= texSample[2];
+				blendA *= texSample[3];
+			}
+
+			// sample alpha mask texture if available 
+			float maskAlpha = 1.0f;
+			if (mat.alphaMaskTexture >= 0) {
+				float maskSample[4];
+				SampleTexture(textures, mat.alphaMaskTexture, tu, tv, maskSample);
+				maskAlpha = maskSample[3];
+			}
+
+			if (mat.blendMode == 1) {
+				// additive: add surface color to accumulator, ray passes through fully
+				colorR += throughR * blendR * maskAlpha * 0.01f;
+				colorG += throughG * blendG * maskAlpha * 0.01f;
+				colorB += throughB * blendB * maskAlpha * 0.01f;
+			} else if (mat.blendMode == 2) {
+				// alpha blend: contribute alpha * color, attenuate throughput by (1 - alpha)
+				float finalA = blendA * maskAlpha;
+				colorR += throughR * blendR * finalA;
+				colorG += throughG * blendG * finalA;
+				colorB += throughB * blendB * finalA;
+				float transmit = 1.0f - finalA;
+				throughR *= transmit;
+				throughG *= transmit;
+				throughB *= transmit;
+			} else if (mat.blendMode == 3) {
+				// filter/modulate: tint throughput by surface color 
+				float invMask = 1.0f - maskAlpha;
+				throughR *= (invMask + maskAlpha * blendR);
+				throughG *= (invMask + maskAlpha * blendG);
+				throughB *= (invMask + maskAlpha * blendB);
+			}
+
+			// continue ray through the blended surface
+			rayOrigX = pX + rayDirX * 0.01f;
+			rayOrigY = pY + rayDirY * 0.01f;
+			rayOrigZ = pZ + rayDirZ * 0.01f;
+			bounce--;
+			alphaSkips++;
+			continue;
+		}
 
 		// accumulate emission weighted by current throughput
 		float emitR = emissive[0], emitG = emissive[1], emitB = emissive[2];
@@ -181,9 +259,6 @@ __global__ __forceinline__ void PathTracingKernel(
 			colorR += throughR * emitR;
 			colorG += throughG * emitG;
 			colorB += throughB * emitB;
-
-			// strongly emissive surfaces terminate the path
-			if (emitLum > 0.5f) break;
 		}
 
 		// use perturbed shading normal for lighting
@@ -201,8 +276,9 @@ __global__ __forceinline__ void PathTracingKernel(
 		float albB = albedo[2];
 
 		// direct light sampling (Next Event Estimation)
-		if (numLights > 0) {
-			// randomly pick one light and weight by numLights
+		int lightsToSample = (numLights > 0) ? ((numLights < 4) ? numLights : 4) : 0;
+		for (int ls = 0; ls < lightsToSample; ls++) {
+			// randomly pick one light and weight
 			int li = (int)(cupt_random(rng) * (float)numLights);
 			rng = cupt_hash(rng);
 			if (li >= numLights) li = numLights - 1;
@@ -228,10 +304,11 @@ __global__ __forceinline__ void PathTracingKernel(
 
 				float R = light.radius;
 				if (d < R) {
-					// smooth radius-based attenuation: (1 - (d/R)^2)^2
+					// Doom 3 style: 1 - (d/R)^2 with smooth hermite at boundary
 					float ratio  = d / R;
-					float falloff = 1.0f - ratio * ratio;
-					falloff = falloff * falloff;
+					float r2 = ratio * ratio;
+					// smoothstep-like: keeps light bright near center, gentle fade at edge
+					float falloff = 1.0f - r2;
 					atten = light.intensity * falloff;
 				}
 			} else if (light.type == 1) {
@@ -262,14 +339,13 @@ __global__ __forceinline__ void PathTracingKernel(
 				lDirZ = toL_z * iD;
 				shadowDist = d;
 
-				// distance attenuation (same smooth falloff as point lights)
+				// distance attenuation (same soft falloff as point lights)
 				float R = light.radius;
 				float distAtten = 0.0f;
 				if (d < R) {
 					float ratio  = d / R;
-					float falloff = 1.0f - ratio * ratio;
-					falloff = falloff * falloff;
-					distAtten = falloff;
+					float r2 = ratio * ratio;
+					distAtten = 1.0f - r2;
 				}
 
 				// cone attenuation: angle between -toLight and spotlight direction
@@ -323,16 +399,16 @@ __global__ __forceinline__ void PathTracingKernel(
 				// check NdotL
 				float NdotL = nx * lDirX + ny * lDirY + nz * lDirZ;
 				if (NdotL > 0.0f && atten > 0.0f) {
-					float sOx = pX + nx * 0.1f;
-					float sOy = pY + ny * 0.1f;
-					float sOz = pZ + nz * 0.1f;
+					float sOx = pX + nx * 0.02f;
+					float sOy = pY + ny * 0.02f;
+					float sOz = pZ + nz * 0.02f;
 
 					bool inShadow = (numBVHNodes > 0) &&
 						TraceShadowRay(sOx, sOy, sOz, lDirX, lDirY, lDirZ, shadowDist,
 									   vertices, triangles, triIndices, bvhNodes, numBVHNodes);
 
 					if (!inShadow) {
-						float scale = NdotL * atten * (float)numLights / 3.14159265f;
+						float scale = NdotL * atten * ((float)numLights / (float)lightsToSample) / 3.14159265f;
 						colorR += throughR * albR * lightColR * scale;
 						colorG += throughG * albG * lightColG * scale;
 						colorB += throughB * albB * lightColB * scale;
@@ -345,9 +421,9 @@ __global__ __forceinline__ void PathTracingKernel(
 				float NdotL = nx * lDirX + ny * lDirY + nz * lDirZ;
 
 				if (NdotL > 0.0f && atten > 0.0f) {
-					float sOx = pX + nx * 0.1f;
-					float sOy = pY + ny * 0.1f;
-					float sOz = pZ + nz * 0.1f;
+					float sOx = pX + nx * 0.02f;
+					float sOy = pY + ny * 0.02f;
+					float sOz = pZ + nz * 0.02f;
 
 					bool inShadow = (numBVHNodes > 0) &&
 						TraceShadowRay(sOx, sOy, sOz, lDirX, lDirY, lDirZ, shadowDist,
@@ -355,8 +431,8 @@ __global__ __forceinline__ void PathTracingKernel(
 
 					if (!inShadow) {
 						// Lambertian BRDF = albedo / pi
-						// weight by numLights to compensate for random selection
-						float scale = NdotL * atten * (float)numLights / 3.14159265f;
+						// weight by numLights/lightsToSample to compensate for random selection
+						float scale = NdotL * atten * ((float)numLights / (float)lightsToSample) / 3.14159265f;
 
 						colorR += throughR * albR * light.color[0] * scale;
 						colorG += throughG * albG * light.color[1] * scale;
@@ -377,7 +453,7 @@ __global__ __forceinline__ void PathTracingKernel(
 		// build orthonormal basis (tangent, bitangent) from normal
 		float upX, upY, upZ;
 		if (fabsf(nx) < 0.9f) { upX = 1.0f; upY = 0.0f; upZ = 0.0f; }
-		else                   { upX = 0.0f; upY = 1.0f; upZ = 0.0f; }
+		else { upX = 0.0f; upY = 1.0f; upZ = 0.0f; }
 
 		// tangent = normalize(cross(up, n))
 		float tX = upY * nz - upZ * ny;
@@ -425,7 +501,6 @@ __global__ __forceinline__ void PathTracingKernel(
 	}
 
 	// progressive accumulation
-	// Blend new sample with running average stored in framebuffer
 	if (frameNumber > 0) {
 		float oldR = framebuffer[pixelIndex + 0];
 		float oldG = framebuffer[pixelIndex + 1];
@@ -443,13 +518,24 @@ __global__ __forceinline__ void PathTracingKernel(
 	framebuffer[pixelIndex + 2] = colorB;
 	framebuffer[pixelIndex + 3] = 1.0f;
 
-	// tonemap (clamp) and write LDR output
-	float r = fminf(colorR, 1.0f);
-	float g = fminf(colorG, 1.0f);
-	float b = fminf(colorB, 1.0f);
+	// tonemap with exposure boost and Reinhard curve
+	const float exposure = 2.0f;
+	float r = colorR * exposure;
+	float g = colorG * exposure;
+	float b = colorB * exposure;
 
-	outputBuffer[pixelIndex + 0] = (unsigned char)(r * 255.0f);
-	outputBuffer[pixelIndex + 1] = (unsigned char)(g * 255.0f);
-	outputBuffer[pixelIndex + 2] = (unsigned char)(b * 255.0f);
+	// Reinhard tonemap: x / (1 + x) — maps [0,inf) -> [0,1)
+	r = r / (1.0f + r);
+	g = g / (1.0f + g);
+	b = b / (1.0f + b);
+
+	// approximate gamma correction (linear -> sRGB)
+	r = powf(fmaxf(r, 0.0f), 1.0f / 2.2f);
+	g = powf(fmaxf(g, 0.0f), 1.0f / 2.2f);
+	b = powf(fmaxf(b, 0.0f), 1.0f / 2.2f);
+
+	outputBuffer[pixelIndex + 0] = (unsigned char)(fminf(r, 1.0f) * 255.0f);
+	outputBuffer[pixelIndex + 1] = (unsigned char)(fminf(g, 1.0f) * 255.0f);
+	outputBuffer[pixelIndex + 2] = (unsigned char)(fminf(b, 1.0f) * 255.0f);
 	outputBuffer[pixelIndex + 3] = 255;
 }

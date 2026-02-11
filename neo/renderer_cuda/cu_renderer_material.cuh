@@ -1,3 +1,6 @@
+#ifndef __CU_RENDERER_MATERIAL_CUH__
+#define __CU_RENDERER_MATERIAL_CUH__
+
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include "renderer_cuda/cu_renderer.h"
@@ -9,7 +12,8 @@ Texture Sampling (bilinear filtering)
 =================================================================================
 */
 __device__ __forceinline__ void SampleTexture(const cudaTexture_t* textures, int texIndex, float u, float v, float* color) {
-	if (texIndex < 0 || texIndex >= MAX_TEXTURES || !textures[texIndex].data) {
+	if (texIndex < 0 || texIndex >= MAX_TEXTURES || !textures[texIndex].data
+		|| textures[texIndex].width <= 0 || textures[texIndex].height <= 0) {
 		// Return white (1,1,1,1) - allows material color modulation
 		color[0] = color[1] = color[2] = color[3] = 1.0f;
 		return;
@@ -62,16 +66,27 @@ __device__  __forceinline__ void EvaluateMaterial(
 	float* outAlbedo,
 	float* outNormal,
 	float* outSpecular,
-	float* outEmission
+	float* outEmission,
+	float& outAlpha
 ) {
-	// emission from ambient / self-illumination stages
+	// emission from ambient
 	outEmission[0] = mat.emission[0];
 	outEmission[1] = mat.emission[1];
 	outEmission[2] = mat.emission[2];
 
+	// sample additive glow map if present
+	if (mat.emissionTexture >= 0) {
+		float emTex[4];
+		SampleTexture(textures, mat.emissionTexture, tu, tv, emTex);
+		outEmission[0] *= emTex[0];
+		outEmission[1] *= emTex[1];
+		outEmission[2] *= emTex[2];
+	}
+
 	outAlbedo[0] = mat.albedo[0];
 	outAlbedo[1] = mat.albedo[1];
 	outAlbedo[2] = mat.albedo[2];
+	outAlpha = 1.0f;
 
 	if (mat.albedoTexture >= 0) {
 		float texColor[4];
@@ -79,6 +94,7 @@ __device__  __forceinline__ void EvaluateMaterial(
 		outAlbedo[0] *= texColor[0];
 		outAlbedo[1] *= texColor[1];
 		outAlbedo[2] *= texColor[2];
+		outAlpha = texColor[3];
 	}
 
 	outNormal[0] = normal[0];
@@ -89,12 +105,12 @@ __device__  __forceinline__ void EvaluateMaterial(
 		float texNormal[4];
 		SampleTexture(textures, mat.normalTexture, tu, tv, texNormal);
 
-		// decode from [0,1] -> [-1,1]
-		float tnX = texNormal[0] * 2.0f - 1.0f;
-		float tnY = texNormal[1] * 2.0f - 1.0f;
-		float tnZ = texNormal[2] * 2.0f - 1.0f;
+		// RXGB normal map compression (Doom 3 convention)
+		// interaction.vfp: "MOV localNormal.x, localNormal.a"
+		float tnX = texNormal[3] * 2.0f - 1.0f;  // alpha -> X
+		float tnY = texNormal[1] * 2.0f - 1.0f;  // green -> Y
+		float tnZ = texNormal[2] * 2.0f - 1.0f;  // blue  -> Z
 
-		// transform tangent-space normal to world-space via TBN matrix
 		// worldN = T * tnX + B * tnY + N * tnZ
 		outNormal[0] = tangent[0] * tnX + bitangent[0] * tnY + normal[0] * tnZ;
 		outNormal[1] = tangent[1] * tnX + bitangent[1] * tnY + normal[1] * tnZ;
@@ -121,8 +137,11 @@ __device__  __forceinline__ void EvaluateMaterial(
 	if (mat.specularTexture >= 0) {
 		float texSpec[4];
 		SampleTexture(textures, mat.specularTexture, tu, tv, texSpec);
-		outSpecular[0] *= texSpec[0];
-		outSpecular[1] *= texSpec[1];
-		outSpecular[2] *= texSpec[2];
+		// interaction.vfp doubles the specular map: "ADD R2, R2, R2"
+		outSpecular[0] *= texSpec[0] * 2.0f;
+		outSpecular[1] *= texSpec[1] * 2.0f;
+		outSpecular[2] *= texSpec[2] * 2.0f;
 	}
 }
+
+#endif // __CU_RENDERER_MATERIAL_CUH__

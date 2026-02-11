@@ -23,9 +23,33 @@ void idCudaRenderer::BeginFrame() {
 	h_lightPtrs.Clear();
 	nextLightIndex = 0;
 
-	// materials persist across frames (cached via materialHash)
-	// only geometry and lights are rebuilt each frame
+	// flush all textures and materials
+	if (needTextureFlush) {
+		common->Printf("idCudaRenderer::BeginFrame(): Flushing %d textures and %d materials (texture overflow)\n",
+			h_textures.Num(), h_materials.Num());
 
+		// free all GPU texture data
+		for (int i = 0; i < h_textures.Num(); i++) {
+			if (h_textures[i].data) {
+				cudaFree(h_textures[i].data);
+			}
+		}
+
+		h_textures.Clear();
+		h_texnums.Clear();
+		h_texturePtrs.Clear();
+		textureHash.Free();
+
+		h_materials.Clear();
+		h_materialPtrs.Clear();
+		materialHash.Free();
+		materialEmission.Clear();
+		nextMaterialIndex = 0;
+
+		needTextureFlush = false;
+	}
+
+	// materials persist across frames 
 	need_reload = 1;
 
 	return;

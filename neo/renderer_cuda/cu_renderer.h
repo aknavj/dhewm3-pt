@@ -76,9 +76,16 @@ struct cudaMaterial_t {
     float albedo[3];
 	float specular[3];
 	float emission[3];
+	float blendColor[4];
     int albedoTexture;
 	int normalTexture;
 	int specularTexture;
+	int emissionTexture;
+	int blendTexture;
+	int alphaMaskTexture;
+	float alphaTest;
+	int coverage; // 0 = opaque, 1 = perforated (alpha tested), 2 = translucent
+	int blendMode; // 0 = opaque, 1 = additive (ONE,ONE), 2 = alpha blend (SRC_ALPHA,ONE_MINUS_SRC_ALPHA), 3 = filter/modulate (DST_COLOR,ZERO)
 };
 
 /*
@@ -154,8 +161,8 @@ public:
 	void			PrintDeviceInfo();
 
     // texture management
-    int             AddMaterial(const idMaterial* material);
-    void            SetMaterial(int index, const idMaterial* material);
+    int             AddMaterial(const idMaterial* material, const float* shaderRegisters = NULL);
+    void            SetMaterial(int index, const idMaterial* material, const float* shaderRegisters = NULL);
     int             AddTexture(const idImage* image);
 
     // frame management
@@ -222,6 +229,9 @@ private:
     idHashIndex             materialHash;       // material ptr hash -> h_materials index
     idList<const idMaterial*> h_materialPtrs;   // host-side material pointers
     int                     nextMaterialIndex;  // next available material slot
+
+    // overflow flag: set when texture limit is hit, flush happens next BeginFrame
+    bool                    needTextureFlush;
 
     // camera parameters
 	float			cam_pos[3];

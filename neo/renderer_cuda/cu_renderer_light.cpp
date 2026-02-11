@@ -87,7 +87,8 @@ void idCudaRenderer::AddSpotLight(
 	}
 
     cudaLight_t light;
-	light.type = 0;
+	memset(&light, 0, sizeof(light));
+	light.type = 2;
 	light.position[0] = position.x;
 	light.position[1] = position.y;
 	light.position[2] = position.z;
@@ -114,9 +115,9 @@ void idCudaRenderer::AddSpotLight(
     // projected texture index fo spotlight projection
     light.projectedTextureIndex = projTexIndex;
 
-    light.lightRadius3[0] = lightRadius * lightRadius * lightRadius;
-	light.lightRadius3[1] = lightRadius * lightRadius * lightRadius;
-	light.lightRadius3[2] = lightRadius * lightRadius * lightRadius;
+    light.lightRadius3[0] = lightRadius;
+	light.lightRadius3[1] = lightRadius;
+	light.lightRadius3[2] = lightRadius;
 
     if (rightAxis) {
 		light.right[0] = rightAxis[0];
@@ -135,7 +136,7 @@ void idCudaRenderer::AddSpotLight(
 	}
 	
 	int index = nextLightIndex;
-    
+
 	h_lights.Append(light);
 	h_lightPtrs.Append(0); // spot lights have no unique engine pointer
 

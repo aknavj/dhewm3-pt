@@ -7,6 +7,7 @@
 
 #include "renderer_cuda/cu_renderer.h"
 #include "renderer_cuda/cu_renderer_math.cuh"
+#include "renderer_cuda/cu_renderer_material.cuh"
 
 /*
 ========================
@@ -191,6 +192,8 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 	const int MAX_BOUNCES = 4;
 	const float SPECULAR_POWER = 64.0f;
 	const float REFLECTIVITY = 0.15f;
+	int alphaSkips = 0;
+	const int MAX_ALPHA_SKIPS = 8;
 
 	for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
 
@@ -242,13 +245,90 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 		float albR = mat.albedo[0];
 		float albG = mat.albedo[1];
 		float albB = mat.albedo[2];
+		float alpha = 1.0f;
 
 		if (mat.albedoTexture >= 0) {
-			float tR, tG, tB;
-			SampleTexture(textures[mat.albedoTexture], tu, tv, tR, tG, tB);
-			albR *= tR;
-			albG *= tG;
-			albB *= tB;
+			float texColor[4];
+			SampleTexture(textures, mat.albedoTexture, tu, tv, texColor);
+			albR *= texColor[0];
+			albG *= texColor[1];
+			albB *= texColor[2];
+			alpha = texColor[3];
+		}
+
+		// alpha test: if perforated surface fails, skip through it
+		if (mat.coverage == 1 && alpha < mat.alphaTest && alphaSkips < MAX_ALPHA_SKIPS) {
+			rayOrigX = pX + rayDirX * 0.01f;
+			rayOrigY = pY + rayDirY * 0.01f;
+			rayOrigZ = pZ + rayDirZ * 0.01f;
+			bounce--;
+			alphaSkips++;
+			continue;
+		}
+
+		// translucent with no explicit blend mode
+		if (mat.coverage == 2 && mat.blendMode == 0 && alpha < 0.5f && alphaSkips < MAX_ALPHA_SKIPS) {
+			rayOrigX = pX + rayDirX * 0.01f;
+			rayOrigY = pY + rayDirY * 0.01f;
+			rayOrigZ = pZ + rayDirZ * 0.01f;
+			bounce--;
+			alphaSkips++;
+			continue;
+		}
+
+		// translucent blending: sample blend texture, contribute color, continue ray
+		if (mat.coverage == 2 && mat.blendMode > 0 && alphaSkips < MAX_ALPHA_SKIPS) {
+			float blendR = mat.blendColor[0];
+			float blendG = mat.blendColor[1];
+			float blendB = mat.blendColor[2];
+			float blendA = mat.blendColor[3];
+
+			if (mat.blendTexture >= 0) {
+				float texSample[4];
+				SampleTexture(textures, mat.blendTexture, tu, tv, texSample);
+				blendR *= texSample[0];
+				blendG *= texSample[1];
+				blendB *= texSample[2];
+				blendA *= texSample[3];
+			}
+
+			// sample alpha mask texture if available (maskcolor stages, e.g. glass)
+			float maskAlpha = 1.0f;
+			if (mat.alphaMaskTexture >= 0) {
+				float maskSample[4];
+				SampleTexture(textures, mat.alphaMaskTexture, tu, tv, maskSample);
+				maskAlpha = maskSample[3];
+			}
+
+			if (mat.blendMode == 1) {
+				// additive
+				colorR += throughR * blendR * maskAlpha * 0.01f;
+				colorG += throughG * blendG * maskAlpha * 0.01f;
+				colorB += throughB * blendB * maskAlpha * 0.01f;
+			} else if (mat.blendMode == 2) {
+				// alpha blend
+				float finalA = blendA * maskAlpha;
+				colorR += throughR * blendR * finalA;
+				colorG += throughG * blendG * finalA;
+				colorB += throughB * blendB * finalA;
+				float transmit = 1.0f - finalA;
+				throughR *= transmit;
+				throughG *= transmit;
+				throughB *= transmit;
+			} else if (mat.blendMode == 3) {
+				// filter/modulate: lerp between no tint and full tint based on mask
+				float invMask = 1.0f - maskAlpha;
+				throughR *= (invMask + maskAlpha * blendR);
+				throughG *= (invMask + maskAlpha * blendG);
+				throughB *= (invMask + maskAlpha * blendB);
+			}
+
+			rayOrigX = pX + rayDirX * 0.01f;
+			rayOrigY = pY + rayDirY * 0.01f;
+			rayOrigZ = pZ + rayDirZ * 0.01f;
+			bounce--;
+			alphaSkips++;
+			continue;
 		}
 
 		// emission contribution from self-illuminating surfaces

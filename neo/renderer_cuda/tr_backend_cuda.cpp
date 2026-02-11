@@ -84,9 +84,10 @@ void RB_CUDA_DrawView() {
 			modelMatrix = surf->space->modelMatrix;
 		}
 
+		// get material index
         int materialIndex = 0;
         if (surf->material) {
-            materialIndex = g_cuRenderer->AddMaterial(surf->material);
+            materialIndex = g_cuRenderer->AddMaterial(surf->material, surf->shaderRegisters);
         }
 
         // add triangle data to CUDA renderer
@@ -100,34 +101,162 @@ void RB_CUDA_DrawView() {
 		);
 	}
 
-    // Add lights from the scene
+    // add lights from the scene
     for (viewLight_t* vLight = backEnd.viewDef->viewLights; vLight; vLight = vLight->next) {
-        
-        if (!vLight->lightDef) {
+
+		if (!vLight->lightDef) {
 			continue;
 		}
-
-        const idRenderLightLocal* light = vLight->lightDef;
+		
+		const idRenderLightLocal* light = vLight->lightDef;
 		const renderLight_t& parms = light->parms;
+		const idMaterial* lightShader = vLight->lightShader;
+		if (!lightShader) {
+			lightShader = light->lightShader;
+		}
 
-        // use global (world-space) light origin from the viewLight
-        idVec3 origin = vLight->globalLightOrigin;
-		idVec3 color(
+		if (!lightShader) {
+			continue; // skip lights without valid shader
+		}
+		
+		// skip fog lights and ambient lights (they don't cast direct light)
+		if (lightShader->IsFogLight() || lightShader->IsAmbientLight() || lightShader->IsBlendLight()) {
+			continue;
+		}
+		
+		idVec3 lightOrigin = parms.origin;
+		
+		// extract light color from shader parameters
+		idVec3 lightColor(
 			parms.shaderParms[SHADERPARM_RED],
 			parms.shaderParms[SHADERPARM_GREEN],
 			parms.shaderParms[SHADERPARM_BLUE]
 		);
+		
+		// if color is not set via shader parms, use default white
+		if (lightColor.LengthSqr() < 0.01f) {
+			lightColor.Set(1.0f, 1.0f, 1.0f);
+		}
+		
+		// get base intensity from SHADERPARM_ALPHA or default
+		float baseIntensity = parms.shaderParms[SHADERPARM_ALPHA];
+		if (baseIntensity < 0.01f) {
+			baseIntensity = 1.0f;
+		}
+		
+		float intensity = baseIntensity;
+		int lightType = 0;
+		
+		float projPlanes[4][4];
+		for (int p = 0; p < 4; p++) {
+			projPlanes[p][0] = vLight->lightProject[p].Normal().x;
+			projPlanes[p][1] = vLight->lightProject[p].Normal().y;
+			projPlanes[p][2] = vLight->lightProject[p].Normal().z;
+			projPlanes[p][3] = vLight->lightProject[p][3];
+		}
+		
+		int projTexIndex = -1;
+		
+		if (parms.pointLight) {
+			lightType = 0; // point light
+			
+			// doom 3 light radius defines the falloff boundary.
+			float radius = (parms.lightRadius.x + parms.lightRadius.y + parms.lightRadius.z) / 3.0f;
+			
+			// compensate for PBR BRDF's 1/pi normalization.
+			intensity = baseIntensity * 3.14159f;
+			if (intensity < 0.5f) intensity = 0.5f;
+			if (intensity > 100.0f) intensity = 100.0f;
+			
+			// apply lightCenter offset if specified
+			if (parms.lightCenter.LengthSqr() > 0.01f) {
+				lightOrigin += parms.lightCenter;
+			}
+			
+			// pass light radius
+			float lightRadiusXYZ[3] = {
+				parms.lightRadius.x,
+				parms.lightRadius.y,
+				parms.lightRadius.z
+			};
+			
+			g_cuRenderer->AddLight(lightOrigin, lightColor, intensity, lightType, radius,
+									 &projPlanes[0][0], -1, lightRadiusXYZ);
+			continue;
+		} else if (parms.parallel) {
+			lightType = 1; // directional light
+			
+			// parallel lights are bright and uniform
+			intensity = baseIntensity * 10.0f;
+			
+			// for directional lights, lightCenter gives the direction
+			lightOrigin = parms.lightCenter;
+			if (lightOrigin.LengthSqr() < 0.01f) {
+				lightOrigin = parms.target - parms.origin;
+			}
 
-        float intensity = 1.0f;
-
-        // use the average of the lightRadius XYZ components as the effective radius
-        float radius = (parms.lightRadius.x + parms.lightRadius.y + parms.lightRadius.z) / 3.0f;
-        if (radius < 1.0f) {
-            radius = 300.0f; // fallback for projected lights
-        }
-
-        g_cuRenderer->AddLight(origin, color, intensity, radius);
-    }
+			lightOrigin.Normalize();
+		} else {
+			// projected light area source
+			idVec3 worldTarget = parms.axis * parms.target;
+			idVec3 worldRight = parms.axis * parms.right;
+			idVec3 worldUp = parms.axis * parms.up;
+			
+			// Extract direction from world-space target vector
+			idVec3 lightDir = worldTarget;
+			float targetLen = lightDir.Length();
+			if (targetLen > 0.01f) {
+				lightDir /= targetLen;
+			} else {
+				lightDir.Set(1.0f, 0.0f, 0.0f);
+			}
+			
+			// calculate frustum dimensions for cone angle computation
+			float projWidth = worldRight.Length();
+			float projHeight = worldUp.Length();
+			float projDepth = (parms.end - parms.start).Length();
+			
+			// Compensate for PBR 1/pi (same as point lights)
+			intensity = baseIntensity * 3.14159f;
+			if (intensity < 0.5f) intensity = 0.5f;
+			if (intensity > 100.0f) intensity = 100.0f;
+			
+			// compute cone half-angle from frustum right/up vs target length
+			float halfWidth = fmaxf(projWidth, projHeight);
+			float coneAngle = atanf(halfWidth / fmaxf(targetLen, 1.0f));
+			
+			// soft edge falloff exponent (higher = sharper edge)
+			float coneFalloff = 2.0f;
+			
+			// use projection depth as the light's effective range
+			float lightRange = projDepth;
+			if (lightRange < 10.0f) lightRange = 500.0f;  // fallback for malformed frustums
+			
+			// extract normalized right and up axis vectors in WORLD space
+			idVec3 rightNorm = worldRight;
+			rightNorm.Normalize();
+			idVec3 upNorm = worldUp;
+			upNorm.Normalize();
+			float rightAxis[3] = { rightNorm.x, rightNorm.y, rightNorm.z };
+			float upAxis[3] = { upNorm.x, upNorm.y, upNorm.z };
+			
+			// extract projected texture for this projected light only.
+			if (lightShader->GetNumStages() > 0) {
+				const shaderStage_t* lightStage = lightShader->GetStage(0);
+				if (lightStage && lightStage->texture.image) {
+					projTexIndex = g_cuRenderer->AddTexture(lightStage->texture.image);
+				}
+			}
+			
+			g_cuRenderer->AddSpotLight(lightOrigin, lightDir, lightColor, 
+										intensity, coneAngle, coneFalloff, 
+										lightRange, &projPlanes[0][0], projTexIndex, 
+										rightAxis, upAxis);
+			continue;
+		}
+		
+		g_cuRenderer->AddLight(lightOrigin, lightColor, intensity, lightType);
+	}
 
 	g_cuRenderer->EndFrame();
 
