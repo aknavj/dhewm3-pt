@@ -263,22 +263,109 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 		for (int li = 0; li < numLights; li++) {
 			const cudaLight_t& light = lights[li];
 
-			float lX = light.position[0] - pX;
-			float lY = light.position[1] - pY;
-			float lZ = light.position[2] - pZ;
+			float lX, lY, lZ; // direction toward light (normalized)
+			float shadowDist; // max shadow ray distance
+			float atten = 0.0f; // computed attenuation
+			float lightColR = light.color[0];
+			float lightColG = light.color[1];
+			float lightColB = light.color[2];
 
-			float dSq = lX * lX + lY * lY + lZ * lZ;
-			float d = sqrtf(dSq + 1e-12f);
-			float iD = 1.0f / d;
-			lX *= iD;
-			lY *= iD;
-			lZ *= iD;
+			if (light.type == 0) {
+				// point light
+				float toL_x = light.position[0] - pX;
+				float toL_y = light.position[1] - pY;
+				float toL_z = light.position[2] - pZ;
 
-			// skip if outside light radius
-			float R = light.radius;
-			if (d >= R) {
-				continue;
+				float dSq = toL_x * toL_x + toL_y * toL_y + toL_z * toL_z;
+				float d = sqrtf(dSq + 1e-12f);
+				float iD = 1.0f / d;
+				lX = toL_x * iD;
+				lY = toL_y * iD;
+				lZ = toL_z * iD;
+				shadowDist = d;
+
+				float R = light.radius;
+				if (d >= R) continue;
+
+				float ratio = d / R;
+				float falloff = 1.0f - ratio * ratio;
+				falloff = falloff * falloff;
+				atten = light.intensity * falloff;
+
+			} else if (light.type == 1) {
+				// directional light
+				lX = light.direction[0];
+				lY = light.direction[1];
+				lZ = light.direction[2];
+
+				float dIL = rsqrtf(lX * lX + lY * lY + lZ * lZ + 1e-12f);
+				lX *= dIL;
+				lY *= dIL;
+				lZ *= dIL;
+
+				shadowDist = 10000.0f;
+				atten = light.intensity;
+
+			} else {
+				// projected / spot light (type == 2)
+				float toL_x = light.position[0] - pX;
+				float toL_y = light.position[1] - pY;
+				float toL_z = light.position[2] - pZ;
+
+				float dSq = toL_x * toL_x + toL_y * toL_y + toL_z * toL_z;
+				float d = sqrtf(dSq + 1e-12f);
+				float iD = 1.0f / d;
+				lX = toL_x * iD;
+				lY = toL_y * iD;
+				lZ = toL_z * iD;
+				shadowDist = d;
+
+				// distance attenuation
+				float R = light.radius;
+				if (d >= R) continue;
+
+				float ratio = d / R;
+				float falloff = 1.0f - ratio * ratio;
+				falloff = falloff * falloff;
+				float distAtten = falloff;
+
+				// cone attenuation
+				float negLX = -lX, negLY = -lY, negLZ = -lZ;
+				float spotCos = negLX * light.direction[0] + negLY * light.direction[1] + negLZ * light.direction[2];
+				float cosHalfAngle = cosf(light.coneAngle);
+
+				float coneAtten = 0.0f;
+				if (spotCos > cosHalfAngle) {
+					float t = (spotCos - cosHalfAngle) / (1.0f - cosHalfAngle + 1e-6f);
+					coneAtten = powf(t, light.coneFalloff);
+				} else {
+					continue; // outside cone
+				}
+
+				atten = light.intensity * distAtten * coneAtten;
+
+				// projected texture modulation
+				if (light.projectedTextureIndex >= 0) {
+					float localX = toL_x * light.right[0] + toL_y * light.right[1] + toL_z * light.right[2];
+					float localY = toL_x * light.up[0]    + toL_y * light.up[1]    + toL_z * light.up[2];
+					float localZ = toL_x * light.direction[0] + toL_y * light.direction[1] + toL_z * light.direction[2];
+
+					if (localZ > 0.001f) {
+						float projU = fmaxf(0.0f, fminf(1.0f, (localX / localZ) * 0.5f + 0.5f));
+						float projV = fmaxf(0.0f, fminf(1.0f, (localY / localZ) * 0.5f + 0.5f));
+
+						float projR, projG, projB;
+						SampleTexture(textures[light.projectedTextureIndex], projU, projV, projR, projG, projB);
+						lightColR *= projR;
+						lightColG *= projG;
+						lightColB *= projB;
+					} else {
+						continue; // behind the spotlight
+					}
+				}
 			}
+
+			if (atten <= 0.0f) continue;
 
 			// shadow ray
 			float sOx = pX + nx * 0.1f;
@@ -286,23 +373,17 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 			float sOz = pZ + nz * 0.1f;
 
 			if (numBVHNodes > 0 &&
-				TraceShadowRay(sOx, sOy, sOz, lX, lY, lZ, d,
+				TraceShadowRay(sOx, sOy, sOz, lX, lY, lZ, shadowDist,
 							   vertices, triangles, triIndices, bvhNodes, numBVHNodes)) {
 				continue;
 			}
 
-			// smooth radius-based attenuation: (1 - (d/R)^2)^2
-			float ratio = d / R;
-			float falloff = 1.0f - ratio * ratio;
-			falloff = falloff * falloff;
-			float atten = light.intensity * falloff;
-
 			// Lambertian diffuse
 			float NdotL = fmaxf(nx * lX + ny * lY + nz * lZ, 0.0f);
 
-			diffR += light.color[0] * NdotL * atten;
-			diffG += light.color[1] * NdotL * atten;
-			diffB += light.color[2] * NdotL * atten;
+			diffR += lightColR * NdotL * atten;
+			diffG += lightColG * NdotL * atten;
+			diffB += lightColB * NdotL * atten;
 
 			// Blinn-Phong specular
 			float hX = lX + vX;
@@ -316,9 +397,9 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 			float NdotH = fmaxf(nx * hX + ny * hY + nz * hZ, 0.0f);
 			float spec = powf(NdotH, SPECULAR_POWER);
 
-			specR += light.color[0] * spec * atten;
-			specG += light.color[1] * spec * atten;
-			specB += light.color[2] * spec * atten;
+			specR += lightColR * spec * atten;
+			specG += lightColG * spec * atten;
+			specB += lightColB * spec * atten;
 		}
 
 		// combine: ambient + diffuse * albedo + specular

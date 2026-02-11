@@ -190,7 +190,7 @@ __global__ __forceinline__ void PathTracingKernel(
 		float albG = albedo[1];
 		float albB = albedo[2];
 
-		// direct light sampling
+		// direct light sampling (Next Event Estimation)
 		if (numLights > 0) {
 			// randomly pick one light and weight by numLights
 			int li = (int)(cupt_random(rng) * (float)numLights);
@@ -198,48 +198,164 @@ __global__ __forceinline__ void PathTracingKernel(
 			if (li >= numLights) li = numLights - 1;
 
 			const cudaLight_t& light = lights[li];
+			float lDirX, lDirY, lDirZ; // direction toward light
+			float shadowDist; // max distance for shadow ray
+			float atten = 0.0f; // light attenuation
 
-			float lX = light.position[0] - pX;
-			float lY = light.position[1] - pY;
-			float lZ = light.position[2] - pZ;
+			if (light.type == 0) {
+				// point light
+				float toL_x = light.position[0] - pX;
+				float toL_y = light.position[1] - pY;
+				float toL_z = light.position[2] - pZ;
 
-			float dSq = lX * lX + lY * lY + lZ * lZ;
-			float d   = sqrtf(dSq + 1e-12f);
-			float iD  = 1.0f / d;
-			lX *= iD;
-			lY *= iD;
-			lZ *= iD;
+				float dSq = toL_x * toL_x + toL_y * toL_y + toL_z * toL_z;
+				float d   = sqrtf(dSq + 1e-12f);
+				float iD  = 1.0f / d;
+				lDirX = toL_x * iD;
+				lDirY = toL_y * iD;
+				lDirZ = toL_z * iD;
+				shadowDist = d;
 
-			float R = light.radius;
-			if (d < R) {
-				float NdotL = nx * lX + ny * lY + nz * lZ;
+				float R = light.radius;
+				if (d < R) {
+					// smooth radius-based attenuation: (1 - (d/R)^2)^2
+					float ratio  = d / R;
+					float falloff = 1.0f - ratio * ratio;
+					falloff = falloff * falloff;
+					atten = light.intensity * falloff;
+				}
+			} else if (light.type == 1) {
+				// directional light
+				lDirX = light.direction[0];
+				lDirY = light.direction[1];
+				lDirZ = light.direction[2];
 
-				if (NdotL > 0.0f) {
+				// normalize (should already be normalized, but be safe)
+				float dIL = rsqrtf(lDirX * lDirX + lDirY * lDirY + lDirZ * lDirZ + 1e-12f);
+				lDirX *= dIL;
+				lDirY *= dIL;
+				lDirZ *= dIL;
+
+				shadowDist = 10000.0f; // effectively infinite
+				atten = light.intensity; // no distance falloff
+			} else {
+				// projected / spot light
+				float toL_x = light.position[0] - pX;
+				float toL_y = light.position[1] - pY;
+				float toL_z = light.position[2] - pZ;
+
+				float dSq = toL_x * toL_x + toL_y * toL_y + toL_z * toL_z;
+				float d   = sqrtf(dSq + 1e-12f);
+				float iD  = 1.0f / d;
+				lDirX = toL_x * iD;
+				lDirY = toL_y * iD;
+				lDirZ = toL_z * iD;
+				shadowDist = d;
+
+				// distance attenuation (same smooth falloff as point lights)
+				float R = light.radius;
+				float distAtten = 0.0f;
+				if (d < R) {
+					float ratio  = d / R;
+					float falloff = 1.0f - ratio * ratio;
+					falloff = falloff * falloff;
+					distAtten = falloff;
+				}
+
+				// cone attenuation: angle between -toLight and spotlight direction
+				float negLX = -lDirX;
+				float negLY = -lDirY;
+				float negLZ = -lDirZ;
+				float spotCos = negLX * light.direction[0] + negLY * light.direction[1] + negLZ * light.direction[2];
+				float cosHalfAngle = cosf(light.coneAngle);
+
+				float coneAtten = 0.0f;
+				if (spotCos > cosHalfAngle) {
+					// inside cone: smooth falloff from center to edge
+					float t = (spotCos - cosHalfAngle) / (1.0f - cosHalfAngle + 1e-6f);
+					coneAtten = powf(t, light.coneFalloff);
+				}
+
+				// optional projected texture modulation
+				float projR = 1.0f, projG = 1.0f, projB = 1.0f;
+				if (light.projectedTextureIndex >= 0 && textures != nullptr) {
+					// project hit point into spotlight's local frame
+					float localX = toL_x * light.right[0] + toL_y * light.right[1] + toL_z * light.right[2];
+					float localY = toL_x * light.up[0]    + toL_y * light.up[1]    + toL_z * light.up[2];
+					float localZ = toL_x * light.direction[0] + toL_y * light.direction[1] + toL_z * light.direction[2];
+
+					if (localZ > 0.001f) {
+						// perspective divide to get UV in [0,1]
+						float projU = (localX / localZ) * 0.5f + 0.5f;
+						float projV = (localY / localZ) * 0.5f + 0.5f;
+
+						// clamp to valid range
+						projU = fmaxf(0.0f, fminf(1.0f, projU));
+						projV = fmaxf(0.0f, fminf(1.0f, projV));
+
+						float texSample[4];
+						SampleTexture(textures[light.projectedTextureIndex], projU, projV, texSample);
+						projR = texSample[0];
+						projG = texSample[1];
+						projB = texSample[2];
+					} else {
+						projR = projG = projB = 0.0f; // behind the spotlight
+					}
+				}
+
+				atten = light.intensity * distAtten * coneAtten;
+
+				// apply projected texture to light color contribution below
+				float lightColR = light.color[0] * projR;
+				float lightColG = light.color[1] * projG;
+				float lightColB = light.color[2] * projB;
+
+				// check NdotL
+				float NdotL = nx * lDirX + ny * lDirY + nz * lDirZ;
+				if (NdotL > 0.0f && atten > 0.0f) {
 					float sOx = pX + nx * 0.1f;
 					float sOy = pY + ny * 0.1f;
 					float sOz = pZ + nz * 0.1f;
 
 					bool inShadow = (numBVHNodes > 0) &&
-						TraceShadowRay(sOx, sOy, sOz, lX, lY, lZ, d,
+						TraceShadowRay(sOx, sOy, sOz, lDirX, lDirY, lDirZ, shadowDist,
 									   vertices, triangles, triIndices, bvhNodes, numBVHNodes);
 
 					if (!inShadow) {
-						// smooth radius-based attenuation: (1 - (d/R)^2)^2
-						float ratio  = d / R;
-						float falloff = 1.0f - ratio * ratio;
-						falloff = falloff * falloff;
-						float atten = light.intensity * falloff;
-
-						// Lambertian BRDF = albedo / pi
-						// weight by numLights to compensate for random selection
 						float scale = NdotL * atten * (float)numLights / 3.14159265f;
-
-						colorR += throughR * albR * light.color[0] * scale;
-						colorG += throughG * albG * light.color[1] * scale;
-						colorB += throughB * albB * light.color[2] * scale;
+						colorR += throughR * albR * lightColR * scale;
+						colorG += throughG * albG * lightColG * scale;
+						colorB += throughB * albB * lightColB * scale;
 					}
 				}
+
+				goto nee_done; // projected light handled per-channel above
 			}
+
+			// common path for point (type 0) and directional (type 1) lights
+			float NdotL = nx * lDirX + ny * lDirY + nz * lDirZ;
+
+			if (NdotL > 0.0f && atten > 0.0f) {
+				float sOx = pX + nx * 0.1f;
+				float sOy = pY + ny * 0.1f;
+				float sOz = pZ + nz * 0.1f;
+
+				bool inShadow = (numBVHNodes > 0) &&
+					TraceShadowRay(sOx, sOy, sOz, lDirX, lDirY, lDirZ, shadowDist,
+								   vertices, triangles, triIndices, bvhNodes, numBVHNodes);
+
+				if (!inShadow) {
+					// Lambertian BRDF = albedo / pi
+					// weight by numLights to compensate for random selection
+					float scale = NdotL * atten * (float)numLights / 3.14159265f;
+
+					colorR += throughR * albR * light.color[0] * scale;
+					colorG += throughG * albG * light.color[1] * scale;
+					colorB += throughB * albB * light.color[2] * scale;
+				}
+			}
+
+			nee_done:;
 		}
 
 		// cosine-weighted hemisphere sampling for indirect bounce

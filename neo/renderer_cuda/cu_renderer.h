@@ -84,10 +84,27 @@ struct cudaMaterial_t {
 /*
  */
 struct cudaLight_t {
+	int type;
     float position[3];
+	float direction[3]; 
     float color[3];
     float intensity;
     float radius;
+	float area[3];
+	int textureIndex;
+	float coneAngle;
+	float coneFalloff;
+
+	// for point and projected lights
+	float lightRadius3[3];
+
+	// projected light orientation
+	float right[3];
+	float up[3];
+
+	// projected light frustum planes (4 planes × 4 components)
+	float lightProject[4][4];
+	int projectedTextureIndex;
 };
 
 /*
@@ -144,10 +161,18 @@ public:
     // frame management
 	void			BeginFrame();
 	void			EndFrame();
+	void            FramePVStoBVH();
+
+	// scene data submission
 	void			AddTriangle(const idDrawVert* verts, int numVerts, const int* indices,
                                 int numIndices, int materialIndex, const float* modelMatrix = NULL);
-    void            AddLight(const idVec3& position, const idVec3& color, float intensity, float radius);
-    void            FramePVStoBVH();
+    void            AddLight(const idVec3& position, const idVec3& color, float intensity, 
+							int type, float lightRadius = 300.0f, const float* lightProject = NULL, 
+							int projTexIndex = -1, const float* lightRadiusXYZ = NULL);
+    void			AddSpotLight(const idVec3& position, const idVec3& direction, const idVec3& color, 
+								float intensity, float coneAngle, float coneFalloff, 
+								float lightRadius = 500.0f, const float* lightProject = NULL, int projTexIndex = -1, 
+								const float* rightAxis = NULL, const float* upAxis = NULL);
 
     // rendering
 	void			RenderView(const renderView_t* renderView);
