@@ -4,6 +4,7 @@
 #include "renderer_cuda/cu_renderer.h"
 #include <cuda_runtime.h>
 
+// extern console variables
 extern idCVar r_cuDebug;
 
 /*
@@ -60,7 +61,7 @@ int idCudaRenderer::AddTexture(const idImage* image) {
 	unsigned char* deviceData = NULL;
 	cudaError_t err = cudaMalloc(&deviceData, dataSize);
 	if (err != cudaSuccess) {
-		common->Warning("idCudaPathTracer::GetOrCreateTexture(): Failed to allocate texture memory: %s\n", cudaGetErrorString(err));
+		common->Warning("idCudaRenderer::AddTexture(): Failed to allocate texture memory: %s\n", cudaGetErrorString(err));
 		delete[] hostData;
 		return -1;
 	}
@@ -69,7 +70,7 @@ int idCudaRenderer::AddTexture(const idImage* image) {
 	delete[] hostData;
 	
 	if (err != cudaSuccess) {
-		common->Warning("idCudaPathTracer::GetOrCreateTexture(): Failed to upload texture data: %s\n", cudaGetErrorString(err));
+		common->Warning("idCudaRenderer::AddTexture(): Failed to upload texture data: %s\n", cudaGetErrorString(err));
 		cudaFree(deviceData);
 		return -1;
 	}

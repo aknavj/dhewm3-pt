@@ -3,6 +3,7 @@
 #include "renderer/tr_local.h"
 #include "renderer_cuda/cu_renderer.h"
 
+// extern console variables
 extern idCVar r_cuDebug;
 
 /*

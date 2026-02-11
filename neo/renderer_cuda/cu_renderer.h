@@ -55,8 +55,8 @@ struct cudaVertex_t {
  */
 struct cudaTriangle_t {
 	int vertexIndices[3];
-	int materialIndex;
 	float bounds[6];
+	int materialIndex;
 };
 
 /*
@@ -103,6 +103,11 @@ struct cudaHitInfo_t {
 #include "../idlib/containers/List.h"
 #include "../idlib/containers/HashIndex.h"
 
+/*
+========================
+idCudaRenderer
+========================
+*/
 class idCudaRenderer {
 
 public:
@@ -153,8 +158,8 @@ private:
     idList<cudaMaterial_t>	h_materials;
 	idList<cudaBVHNode_t>	h_bvhNodes;
 	idList<int>				h_bvhTriIndices;
-	unsigned char*	h_outputPixels;
-	size_t			h_outputPixelsSize;
+	unsigned char*          h_outputPixels;
+	size_t                  h_outputPixelsSize;
 
     // texture data    
     idHashIndex             textureHash;    // texnum -> h_textures index

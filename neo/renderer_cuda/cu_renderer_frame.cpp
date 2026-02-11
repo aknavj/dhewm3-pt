@@ -4,7 +4,7 @@
 #include "renderer_cuda/cu_renderer.h"
 #include <cuda_runtime.h>
 
-// console variables
+// extern console variables
 extern idCVar r_cuDebug;
 extern idCVar r_cuRenderMode;
 
@@ -19,7 +19,7 @@ void idCudaRenderer::BeginFrame() {
 	h_materials.Clear();
 
 	need_reload = 1;
-	
+
 	return;
 }
 
