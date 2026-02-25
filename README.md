@@ -1,3 +1,92 @@
+# DOOM3 CUDA PATH TRACING RENDERER
+
+This fork adds an experimental **GPU path tracing renderer** (`neo/renderer_cuda/`) built with
+NVIDIA CUDA that can replace the classic OpenGL rasterizer. It is gated behind the
+`CUDA_PATHTRACER` CMake option (off by default).
+
+## Overview
+
+The renderer extracts the full scene (geometry, materials, lights) from dhewm3's existing
+draw-call pipeline each frame, uploads it to the GPU, builds a BVH, and path traces the
+image — blitting the final pixels back to OpenGL via `glDrawPixels`.
+
+## Rendering Modes
+
+| CVar Value | Mode |
+|------------|------|
+| 0 | **Full PBR path tracing** — Monte Carlo with Cook-Torrance BRDF, progressive accumulation |
+| 1 | BVH debug — ray cast with random per-triangle coloring |
+| 2–6 | Texture debug — visualise albedo, base color, normal map, specular map |
+| 7 | **Whitted-style ray tracing** — direct lighting, Blinn-Phong specular, mirror reflections |
+
+## Key Features
+
+- **Linear BVH (LBVH)** built entirely on the GPU each frame using the Karras algorithm
+  and Thrust radix sort
+- **PBR materials** extracted from Doom 3 shader stages — albedo, normal map, specular,
+  alpha test, blend modes, vertex colors, emission, transmission/glass (Fresnel + IOR)
+- **Stochastic direct lighting** with soft shadows, projected textures, and spotlight falloff
+- **One-bounce indirect lighting** (global illumination) via cosine-weighted hemisphere sampling
+- **Volumetric scattering** with ray-marched Henyey-Greenstein phase function
+- **Progressive temporal accumulation** with automatic reset on camera movement and quality
+  ramp-up over successive frames
+- **Tone mapping** — selectable Reinhard / ACES / Uncharted 2 with configurable exposure and gamma
+- **Configurable render scale** (0.25×–1.0×) for performance tuning
+- **~50 CVars** controlling SPP, bounce depth, Russian roulette, firefly clamping, sky colour,
+  fog density, and more
+- **Comparison / sequence tools** for capturing side-by-side GL vs. path-traced screenshots
+
+## Building with CUDA
+
+Requires the NVIDIA CUDA Toolkit. Enable the option when running CMake:
+
+```
+cmake -DCUDA_PATHTRACER=ON /path/to/repository/neo
+```
+
+The build targets SM 75 through SM 90 (Turing → Hopper). `.cu` files are compiled
+with NVCC; all other sources are compiled normally with the host C++ compiler.
+
+## Console Variables
+
+All CVars use the `r_cu` prefix and can be set from the Doom 3 console or config files.
+
+| CVar | Default | Description |
+|------|---------|-------------|
+| `r_cuRenderer` | `1` | Enable the CUDA renderer |
+| `r_cuRendererMode` | `0` | Render mode: 0 = path tracing, 1 = BVH debug, 2 = textured combined, 3 = base color, 4 = albedo texture, 5 = normal texture, 6 = specular texture, 7 = Whitted ray tracing |
+| `r_cuDebug` | `0` | Show CUDA renderer debug info |
+| `r_cuRenderScale` | `0.5` | Render resolution scale (0.25–1.0, lower = faster) |
+| `r_cuSamplesPerPixel` | `4` | Samples per pixel per frame (1–64) |
+| `r_cuMaxBounces` | `3` | Maximum ray bounces (1–16) |
+| `r_cuDirectSamples` | `2` | Direct light samples per hit (1–8) |
+| `r_cuIndirectProbability` | `0.15` | Indirect lighting probability (0.0–1.0) |
+| `r_cuRussianRoulette` | `1` | Enable Russian roulette path termination |
+| `r_cuRRMinBounces` | `2` | Minimum bounces before Russian roulette kicks in (1–8) |
+| `r_cuRRMinSurvival` | `0.1` | Minimum survival probability (0.05–0.5) |
+| `r_cuRRThreshold` | `0.05` | Throughput threshold for early termination (0.0–0.5) |
+| `r_cuFireflyClamp` | `5.0` | Clamp max sample brightness (0 = off) |
+| `r_cuEarlyTermination` | `0.25` | Early path termination on low throughput (0.0–1.0) |
+| `r_cuAccumulation` | `1` | Temporal accumulation (0 = off, 1 = on) |
+| `r_cuRayOffset` | `0.001` | Ray origin offset to prevent self-intersection |
+| `r_cuEmissionScale` | `1.0` | Emission multiplier (0.1–10.0) |
+| `r_cuSpecularScale` | `2.0` | Specular BRDF multiplier (Doom 3 uses 2×) |
+| `r_cuSoftShadowScale` | `0.2` | Soft shadow jitter (0 = hard, 0.05 = subtle, 0.2 = soft) |
+| `r_cuExposure` | `1.0` | Exposure multiplier (0.1–10.0) |
+| `r_cuGamma` | `2.2` | Gamma correction (1.8–2.6) |
+| `r_cuToneMap` | `1` | Tone mapper: 0 = Reinhard, 1 = ACES, 2 = Uncharted 2 |
+| `r_cuSkyIntensity` | `0.0` | Sky dome ambient intensity (0.0–2.0) |
+| `r_cuSkyZenithR/G/B` | `0.3 / 0.35 / 0.5` | Sky zenith colour |
+| `r_cuSkyHorizonR/G/B` | `0.4 / 0.35 / 0.3` | Sky horizon colour |
+| `r_cuSkyGroundR/G/B` | `0.1 / 0.08 / 0.05` | Sky ground colour |
+| `r_cuVolumetricIntensity` | `0.0` | Volumetric scattering intensity (0 = off, expensive) |
+| `r_cuVolumetricDensity` | `0.008` | Fog density (0.001–0.1) |
+| `r_cuVolumetricSteps` | `16` | Ray-march steps (4–64) |
+| `r_cuVolumetricAnisotropy` | `0.6` | Scattering anisotropy, Henyey-Greenstein g (−1 to 1) |
+| `r_cuVolumetricFalloff` | `2.0` | Distance falloff exponent |
+| `r_cuVolumetricMaxDist` | `500.0` | Maximum sampling distance |
+
+
 # ABOUT
 
 _dhewm 3_ is a _Doom 3_ GPL source port, known to work on at least Windows, Linux, macOS and FreeBSD.
@@ -38,7 +127,6 @@ Compared to the original _DOOM 3_, the changes of _dhewm 3_ worth mentioning are
 - An advanced, mod-independent settings menu (opened with `F10` by default)
 
 See [Changelog.md](./Changelog.md) for a more complete changelog.
-
 
 # GENERAL NOTES
 
