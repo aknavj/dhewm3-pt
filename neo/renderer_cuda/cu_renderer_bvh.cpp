@@ -15,311 +15,89 @@ void idCudaRenderer::FramePVStoBVH() {
 }
 
 /*
- */
-namespace {
-
-    /*
-     */
-    struct BVHBuildEntry {
-        int nodeIndex;		// index into h_bvhNodes to write
-        int start;			// first triangle index in triIdx
-        int count;			// number of triangles
-    };
-
-    /*
-     */
-    static void ComputeAABB(
-        const idList<cudaTriangle_t>& tris,
-        const int* indices,
-        int start,
-        int count,
-        float outMin[3],
-        float outMax[3]
-    ) {
-        outMin[0] = outMin[1] = outMin[2] =  1e30f;
-        outMax[0] = outMax[1] = outMax[2] = -1e30f;
-
-        for (int i = start; i < start + count; i++) {
-            const cudaTriangle_t& t = tris[indices[i]];
-            for (int a = 0; a < 3; a++) {
-                if (t.bounds[a]     < outMin[a]) outMin[a] = t.bounds[a];
-                if (t.bounds[3 + a] > outMax[a]) outMax[a] = t.bounds[3 + a];
-            }
-        }
-    }
-
-    /*
-     */
-    static float SurfaceArea(const float mn[3], const float mx[3]) {
-        float dx = mx[0] - mn[0];
-        float dy = mx[1] - mn[1];
-        float dz = mx[2] - mn[2];
-        return 2.0f * (dx * dy + dy * dz + dz * dx);
-    }
-
-    /*
-     */
-    static float TriCentroid(const cudaTriangle_t& t, int axis) {
-        return 0.5f * (t.bounds[axis] + t.bounds[3 + axis]);
-    }
-
-}
-
-/*
 ========================
 idCudaRenderer::BuildBVH
+
+GPU-accelerated Linear BVH construction.
 ========================
 */
 void idCudaRenderer::BuildBVH() {
 
-	int triCount = h_triangles.Num();
-	if (triCount == 0) {
+	int N = h_triangles.Num();
+	if (N == 0) {
 		num_bvh_nodes = 0;
 		return;
 	}
 
-	idList<int> triIdx;
-	triIdx.SetNum(triCount);
-	for (int i = 0; i < triCount; i++) {
-		triIdx[i] = i;
+	int numNodes    = 2 * N - 1;
+	int numInternal = N - 1;
+
+	// reallocate BVH output buffers if needed
+	if (numNodes > allocatedBVHNodes) {
+		if (d_bvhNodes) cudaFree(d_bvhNodes);
+		allocatedBVHNodes = numNodes + 1000;
+		cudaMalloc(&d_bvhNodes, allocatedBVHNodes * sizeof(cudaBVHNode_t));
+	}
+	if (N > allocatedTriIndices) {
+		if (d_triIndices) cudaFree(d_triIndices);
+		allocatedTriIndices = N + 1000;
+		cudaMalloc(&d_triIndices, allocatedTriIndices * sizeof(int));
 	}
 
-	h_bvhNodes.SetNum(0);
-	h_bvhNodes.SetGranularity(triCount * 2);
+	// reallocate LBVH temporary buffers if needed
+	if (N > allocatedLBVHSize) {
+		if (d_mortonCodes)     cudaFree(d_mortonCodes);
+		if (d_sortedIndices)   cudaFree(d_sortedIndices);
+		if (d_parents)         cudaFree(d_parents);
+		if (d_atomicCounters)  cudaFree(d_atomicCounters);
 
-	int nodesUsed = 0;
+		allocatedLBVHSize = N + 1000;
+		cudaMalloc(&d_mortonCodes,    allocatedLBVHSize * sizeof(unsigned int));
+		cudaMalloc(&d_sortedIndices,  allocatedLBVHSize * sizeof(int));
+		cudaMalloc(&d_parents,        (2 * allocatedLBVHSize) * sizeof(int));
+		cudaMalloc(&d_atomicCounters, allocatedLBVHSize * sizeof(int));
 
-	{
-		cudaBVHNode_t root;
-		memset(&root, 0, sizeof(root));
-		h_bvhNodes.Append(root);
-		nodesUsed = 1;
-	}
-
-	static const int MAX_STACK = 128;
-	BVHBuildEntry stack[MAX_STACK];
-	int stackPtr = 0;
-
-	stack[stackPtr++] = { 0, 0, triCount };
-
-	static const float COST_TRAVERSE  = 1.0f;
-	static const float COST_INTERSECT = 1.0f;
-	static const int   SAH_BINS = 12;
-	static const int   LEAF_MAX = 4;
-
-	while (stackPtr > 0) {
-		BVHBuildEntry entry = stack[--stackPtr];
-
-		int nodeIdx = entry.nodeIndex;
-		int start   = entry.start;
-		int count   = entry.count;
-
-		float bMin[3], bMax[3];
-		ComputeAABB(h_triangles, triIdx.Ptr(), start, count, bMin, bMax);
-
-		cudaBVHNode_t& node = h_bvhNodes[nodeIdx];
-		for (int a = 0; a < 3; a++) {
-			node.bounds[a]     = bMin[a];
-			node.bounds[3 + a] = bMax[a];
-		}
-
-		if (count <= LEAF_MAX) {
-			node.first_primitive = start;
-			node.primitive_count = count;
-			node.l_child = -1;
-			node.r_child = -1;
-			continue;
-		}
-
-		float parentArea = SurfaceArea(bMin, bMax);
-		if (parentArea < 1e-12f) {
-			node.first_primitive = start;
-			node.primitive_count = count;
-			node.l_child = -1;
-			node.r_child = -1;
-			continue;
-		}
-
-		float bestCost  = 1e30f;
-		int   bestAxis  = -1;
-		int   bestBin   = -1;
-
-		for (int axis = 0; axis < 3; axis++) {
-			float cMin =  1e30f;
-			float cMax = -1e30f;
-			for (int i = start; i < start + count; i++) {
-				float c = TriCentroid(h_triangles[triIdx[i]], axis);
-				if (c < cMin) cMin = c;
-				if (c > cMax) cMax = c;
-			}
-
-			if (cMax - cMin < 1e-7f) {
-				continue;
-			}
-
-			struct Bin {
-				float mn[3], mx[3];
-				int   count;
-			};
-			Bin bins[SAH_BINS];
-			for (int b = 0; b < SAH_BINS; b++) {
-				bins[b].mn[0] = bins[b].mn[1] = bins[b].mn[2] =  1e30f;
-				bins[b].mx[0] = bins[b].mx[1] = bins[b].mx[2] = -1e30f;
-				bins[b].count = 0;
-			}
-
-			float scale = (float)SAH_BINS / (cMax - cMin);
-			for (int i = start; i < start + count; i++) {
-				const cudaTriangle_t& tri = h_triangles[triIdx[i]];
-				int b = (int)((TriCentroid(tri, axis) - cMin) * scale);
-				if (b >= SAH_BINS) b = SAH_BINS - 1;
-				bins[b].count++;
-				for (int a = 0; a < 3; a++) {
-					if (tri.bounds[a]     < bins[b].mn[a]) bins[b].mn[a] = tri.bounds[a];
-					if (tri.bounds[3 + a] > bins[b].mx[a]) bins[b].mx[a] = tri.bounds[3 + a];
-				}
-			}
-
-			float leftArea[SAH_BINS - 1];
-			int   leftCount[SAH_BINS - 1];
-			{
-				float mn[3] = { 1e30f,  1e30f,  1e30f};
-				float mx[3] = {-1e30f, -1e30f, -1e30f};
-				int   cnt = 0;
-				for (int b = 0; b < SAH_BINS - 1; b++) {
-					cnt += bins[b].count;
-					for (int a = 0; a < 3; a++) {
-						if (bins[b].mn[a] < mn[a]) mn[a] = bins[b].mn[a];
-						if (bins[b].mx[a] > mx[a]) mx[a] = bins[b].mx[a];
-					}
-					leftArea[b]  = SurfaceArea(mn, mx);
-					leftCount[b] = cnt;
-				}
-			}
-
-			float rightArea[SAH_BINS - 1];
-			int   rightCount[SAH_BINS - 1];
-			{
-				float mn[3] = { 1e30f,  1e30f,  1e30f};
-				float mx[3] = {-1e30f, -1e30f, -1e30f};
-				int   cnt = 0;
-				for (int b = SAH_BINS - 1; b > 0; b--) {
-					cnt += bins[b].count;
-					for (int a = 0; a < 3; a++) {
-						if (bins[b].mn[a] < mn[a]) mn[a] = bins[b].mn[a];
-						if (bins[b].mx[a] > mx[a]) mx[a] = bins[b].mx[a];
-					}
-					rightArea[b - 1]  = SurfaceArea(mn, mx);
-					rightCount[b - 1] = cnt;
-				}
-			}
-
-			for (int b = 0; b < SAH_BINS - 1; b++) {
-				float cost = COST_TRAVERSE
-					+ COST_INTERSECT * (leftCount[b]  * leftArea[b]
-					                  + rightCount[b] * rightArea[b]) / parentArea;
-				if (cost < bestCost) {
-					bestCost = cost;
-					bestAxis = axis;
-					bestBin  = b;
-				}
-			}
-		}
-
-		if (bestAxis < 0) {
-			float dx = bMax[0] - bMin[0];
-			float dy = bMax[1] - bMin[1];
-			float dz = bMax[2] - bMin[2];
-			bestAxis = (dx >= dy && dx >= dz) ? 0 : (dy >= dz) ? 1 : 2;
-		}
-
-		float leafCost = COST_INTERSECT * (float)count;
-		if (bestCost >= leafCost && count <= LEAF_MAX * 4) {
-			node.first_primitive = start;
-			node.primitive_count = count;
-			node.l_child = -1;
-			node.r_child = -1;
-			continue;
-		}
-
-		{
-			float cMin =  1e30f;
-			float cMax = -1e30f;
-			for (int i = start; i < start + count; i++) {
-				float c = TriCentroid(h_triangles[triIdx[i]], bestAxis);
-				if (c < cMin) cMin = c;
-				if (c > cMax) cMax = c;
-			}
-
-			float scale = (float)SAH_BINS / (cMax - cMin + 1e-30f);
-			float pivot;
-			if (bestBin >= 0) {
-				pivot = cMin + ((float)(bestBin + 1)) / scale;
-			} else {
-				pivot = 0.5f * (cMin + cMax);
-			}
-
-			int lo = start;
-			int hi = start + count - 1;
-			int i = lo;
-			while (i <= hi) {
-				float c = TriCentroid(h_triangles[triIdx[i]], bestAxis);
-				if (c < pivot) {
-					int tmp = triIdx[lo]; triIdx[lo] = triIdx[i]; triIdx[i] = tmp;
-					lo++;
-					i++;
-				} else if (c > pivot) {
-					int tmp = triIdx[hi]; triIdx[hi] = triIdx[i]; triIdx[i] = tmp;
-					hi--;
-				} else {
-					i++;
-				}
-			}
-
-			int leftCount = lo - start;
-			if (leftCount <= 0) leftCount = 1;
-			if (leftCount >= count) leftCount = count - 1;
-
-			int leftChild  = nodesUsed++;
-			int rightChild = nodesUsed++;
-			{
-				cudaBVHNode_t emptyNode;
-				memset(&emptyNode, 0, sizeof(emptyNode));
-				while (h_bvhNodes.Num() <= rightChild) {
-					h_bvhNodes.Append(emptyNode);
-				}
-			}
-            
-            h_bvhNodes[nodeIdx].l_child = leftChild;
-			h_bvhNodes[nodeIdx].r_child = rightChild;
-			h_bvhNodes[nodeIdx].first_primitive = 0;
-			h_bvhNodes[nodeIdx].primitive_count = 0;
-
-			if (stackPtr + 2 > MAX_STACK) {
-				h_bvhNodes[nodeIdx].first_primitive = start;
-				h_bvhNodes[nodeIdx].primitive_count = count;
-				h_bvhNodes[nodeIdx].l_child = -1;
-				h_bvhNodes[nodeIdx].r_child = -1;
-				nodesUsed -= 2;
-				continue;
-			}
-
-			stack[stackPtr++] = { rightChild, start + leftCount, count - leftCount };
-			stack[stackPtr++] = { leftChild,  start,             leftCount };
+		if (r_cuDebug.GetBool()) {
+			common->Printf("LBVH: allocated temp buffers for %d triangles\n", allocatedLBVHSize);
 		}
 	}
 
-	h_bvhNodes.SetNum(nodesUsed);
-	num_bvh_nodes = nodesUsed;
+	// compute scene bounds on CPU (fast for PVS-culled tri counts)
+	float sceneBounds[6];
+	sceneBounds[0] = sceneBounds[1] = sceneBounds[2] =  1e30f;  // min
+	sceneBounds[3] = sceneBounds[4] = sceneBounds[5] = -1e30f;  // max
 
-	h_bvhTriIndices.SetNum(triCount);
-	for (int i = 0; i < triCount; i++) {
-		h_bvhTriIndices[i] = triIdx[i];
+	for (int i = 0; i < N; i++) {
+		const cudaTriangle_t& tri = h_triangles[i];
+		for (int j = 0; j < 3; j++) {
+			if (tri.bounds[j]     < sceneBounds[j])     sceneBounds[j]     = tri.bounds[j];
+			if (tri.bounds[j + 3] > sceneBounds[j + 3]) sceneBounds[j + 3] = tri.bounds[j + 3];
+		}
 	}
 
-	if (r_cuDebug.GetBool()) {
-		common->Printf("  BVH: %d nodes for %d triangles\n", num_bvh_nodes, triCount);
+	// small expansion to avoid degenerate extents
+	for (int j = 0; j < 3; j++) {
+		if (sceneBounds[j + 3] - sceneBounds[j] < 0.01f) {
+			sceneBounds[j]     -= 0.5f;
+			sceneBounds[j + 3] += 0.5f;
+		}
 	}
+
+	// launch GPU LBVH build
+	LaunchBuildLBVH(
+		d_triangles,
+		N,
+		d_bvhNodes,
+		d_triIndices,
+		d_mortonCodes,
+		d_sortedIndices,
+		d_parents,
+		d_atomicCounters,
+		sceneBounds,
+		stream
+	);
+
+	num_bvh_nodes = numNodes;
 }
 
 #endif // HAVE_CUDA

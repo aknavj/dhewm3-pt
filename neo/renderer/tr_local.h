@@ -978,6 +978,7 @@ extern idCVar r_shadowPolygonFactor;	// scale value for stencil shadow drawing
 extern idCVar r_jitter;					// randomly subpixel jitter the projection matrix
 extern idCVar r_lightSourceRadius;		// for soft-shadow sampling
 extern idCVar r_lockSurfaces;
+extern idCVar r_frameStats;
 extern idCVar r_orderIndexes;			// perform index reorganization to optimize vertex use
 
 extern idCVar r_debugLineDepthTest;		// perform depth test on debug lines
@@ -1314,7 +1315,15 @@ DRAW_CUDA
 	void RB_CUDA_Init( void );
 	void RB_CUDA_Shutdown( void );
 	void RB_CUDA_DrawView( void );
+
+	void RB_CUDA_CompareCheck( void );
+	void RB_CUDA_SequenceCheck( void );
 #endif
+
+// OpenGL sequence renderer (no CUDA dependency)
+void	R_GLSequence_f( const idCmdArgs &args );
+void	R_GLAbort_f( const idCmdArgs &args );
+void	RB_GLSequenceCheck( void );
 
 /*
 ============================================================

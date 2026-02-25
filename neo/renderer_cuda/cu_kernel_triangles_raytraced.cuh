@@ -11,18 +11,18 @@
 
 /*
 ========================
-TraceShadowRay
+TraceShadowRay_RT
+BVH shadow ray test
 ========================
 */
-__device__ __forceinline__ bool TraceShadowRay(
+__device__ __forceinline__ bool TraceShadowRay_RT(
 	float oX, float oY, float oZ,
 	float dX, float dY, float dZ,
 	float maxDist,
 	const cudaVertex_t* vertices,
 	const cudaTriangle_t* triangles,
 	const int* triIndices,
-	const cudaBVHNode_t* bvhNodes,
-	int numBVHNodes
+	const cudaBVHNode_t* bvhNodes
 ) {
 	float idX = 1.0f / (fabsf(dX) > 1e-8f ? dX : copysignf(1e-8f, dX));
 	float idY = 1.0f / (fabsf(dY) > 1e-8f ? dY : copysignf(1e-8f, dY));
@@ -36,22 +36,23 @@ __device__ __forceinline__ bool TraceShadowRay(
 		int ni = stack[--sp];
 		const cudaBVHNode_t& nd = bvhNodes[ni];
 
-		if (!IntersectAABB(oX, oY, oZ, idX, idY, idZ, nd.bounds, maxDist)) {
+		if (!IntersectAABB_Simple(oX, oY, oZ, idX, idY, idZ, nd.bounds, maxDist)) {
 			continue;
 		}
 
-		if (nd.primitive_count > 0) {
-			for (int i = 0; i < nd.primitive_count; i++) {
-				int ti = triIndices[nd.first_primitive + i];
-				float t = IntersectTriangle(oX, oY, oZ, dX, dY, dZ,
-										   vertices, triangles[ti]);
+		if (nd.leftChild == -1) {
+			// Leaf
+			for (int i = 0; i < nd.primitiveCount; i++) {
+				int ti = triIndices[nd.firstPrimitive + i];
+				float t = IntersectTriangle_Simple(oX, oY, oZ, dX, dY, dZ,
+												   vertices, triangles[ti]);
 				if (t > 0.001f && t < maxDist) {
 					return true;
 				}
 			}
 		} else {
-			if (nd.l_child >= 0 && sp < 63) stack[sp++] = nd.l_child;
-			if (nd.r_child >= 0 && sp < 63) stack[sp++] = nd.r_child;
+			if (nd.leftChild >= 0 && sp < 63) stack[sp++] = nd.leftChild;
+			if (nd.rightChild >= 0 && sp < 63) stack[sp++] = nd.rightChild;
 		}
 	}
 	return false;
@@ -59,18 +60,17 @@ __device__ __forceinline__ bool TraceShadowRay(
 
 /*
 ========================
-TraceRay
+TraceRay_RT
+BVH closest-hit traversal with barycentric output
 ========================
 */
-__device__ __forceinline__ float TraceRay(
+__device__ __forceinline__ float TraceRay_RT(
 	float oX, float oY, float oZ,
 	float dX, float dY, float dZ,
 	const cudaVertex_t* vertices,
 	const cudaTriangle_t* triangles,
 	const int* triIndices,
 	const cudaBVHNode_t* bvhNodes,
-	int numBVHNodes,
-	int numTriangles,
 	int& outTriIdx,
 	float& outU,
 	float& outV
@@ -82,48 +82,35 @@ __device__ __forceinline__ float TraceRay(
 	float nearest = 1e30f;
 	outTriIdx = -1;
 
-	if (numBVHNodes > 0) {
-		int stack[64];
-		int sp = 0;
-		stack[sp++] = 0;
+	int stack[64];
+	int sp = 0;
+	stack[sp++] = 0;
 
-		while (sp > 0) {
-			int ni = stack[--sp];
-			const cudaBVHNode_t& nd = bvhNodes[ni];
+	while (sp > 0) {
+		int ni = stack[--sp];
+		const cudaBVHNode_t& nd = bvhNodes[ni];
 
-			if (!IntersectAABB(oX, oY, oZ, idX, idY, idZ, nd.bounds, nearest)) {
-				continue;
-			}
-
-			if (nd.primitive_count > 0) {
-				for (int i = 0; i < nd.primitive_count; i++) {
-					int ti = triIndices[nd.first_primitive + i];
-					float bu, bv;
-					float t = IntersectTriangleUV(oX, oY, oZ, dX, dY, dZ,
-												 vertices, triangles[ti], bu, bv);
-					if (t > 0.0f && t < nearest) {
-						nearest = t;
-						outTriIdx = ti;
-						outU = bu;
-						outV = bv;
-					}
-				}
-			} else {
-				if (nd.l_child >= 0 && sp < 63) stack[sp++] = nd.l_child;
-				if (nd.r_child >= 0 && sp < 63) stack[sp++] = nd.r_child;
-			}
+		if (!IntersectAABB_Simple(oX, oY, oZ, idX, idY, idZ, nd.bounds, nearest)) {
+			continue;
 		}
-	} else {
-		for (int i = 0; i < numTriangles; i++) {
-			float bu, bv;
-			float t = IntersectTriangleUV(oX, oY, oZ, dX, dY, dZ,
-										 vertices, triangles[i], bu, bv);
-			if (t > 0.0f && t < nearest) {
-				nearest = t;
-				outTriIdx = i;
-				outU = bu;
-				outV = bv;
+
+		if (nd.leftChild == -1) {
+			// leaf
+			for (int i = 0; i < nd.primitiveCount; i++) {
+				int ti = triIndices[nd.firstPrimitive + i];
+				float bu, bv;
+				float t = IntersectTriangleUV_Simple(oX, oY, oZ, dX, dY, dZ,
+													 vertices, triangles[ti], bu, bv);
+				if (t > 0.0f && t < nearest) {
+					nearest = t;
+					outTriIdx = ti;
+					outU = bu;
+					outV = bv;
+				}
 			}
+		} else {
+			if (nd.leftChild >= 0 && sp < 63) stack[sp++] = nd.leftChild;
+			if (nd.rightChild >= 0 && sp < 63) stack[sp++] = nd.rightChild;
 		}
 	}
 	return nearest;
@@ -137,24 +124,44 @@ TriangleDrawRayTracedKernel
 __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 	const cudaVertex_t* vertices,
 	const cudaTriangle_t* triangles,
+	const cudaBVHNode_t* bvhNodes,
+	const int* triIndices,
 	const cudaMaterial_t* materials,
 	const cudaTexture_t* textures,
 	const cudaLight_t* lights,
 	int numLights,
-	const int* triIndices,
-	const cudaBVHNode_t* bvhNodes,
-	int numBVHNodes,
 	float* framebuffer,
-	unsigned char* outputBuffer,
 	int width,
 	int height,
-	int numTriangles,
 	const float* cameraPos,
 	const float* cameraForward,
 	const float* cameraRight,
 	const float* cameraUp,
-	float fov_x,
-	float fov_y
+	float fov,
+	float fovY,
+	int samplesPerPixel,
+	int maxDepth,
+	int maxLightSamples,
+	int frameIndex,
+	float emissionBoost,
+	float indirectProb,
+	int rrEnabled,
+	int rrMinBounces,
+	float rrSurvivalMin,
+	float earlyTermThreshold,
+	float fireflyClamp,
+	float throughputClamp,
+	float rayOffset,
+	float specularBoost,
+	float skyIntensity,
+	const float* skyColorZenith,
+	const float* skyColorHorizon,
+	const float* skyColorGround,
+	float volumetricDensity,
+	int volumetricSteps,
+	float volumetricAnisotropy,
+	float volFalloff,
+	float volMaxDist
 ) {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -166,8 +173,8 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 	int pixelIndex = (y * width + x) * 4;
 
 	// generate primary ray
-	float halfTanX = tanf(fov_x * 0.5f * 3.14159265f / 180.0f);
-	float halfTanY = tanf(fov_y * 0.5f * 3.14159265f / 180.0f);
+	float halfTanX = tanf(fov * 0.5f * 3.14159265f / 180.0f);
+	float halfTanY = tanf(fovY * 0.5f * 3.14159265f / 180.0f);
 
 	float su = (2.0f * ((float)x + 0.5f) / (float)width  - 1.0f) * halfTanX;
 	float sv = (2.0f * ((float)y + 0.5f) / (float)height - 1.0f) * halfTanY;
@@ -194,22 +201,35 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 	const float REFLECTIVITY = 0.15f;
 	int alphaSkips = 0;
 	const int MAX_ALPHA_SKIPS = 8;
+	float biasOffset = fmaxf(rayOffset, 0.01f);
 
 	for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
 
 		int hitIdx;
 		float hitU, hitV;
-		float hitT = TraceRay(rayOrigX, rayOrigY, rayOrigZ,
-							  rayDirX, rayDirY, rayDirZ,
-							  vertices, triangles, triIndices, bvhNodes,
-							  numBVHNodes, numTriangles,
-							  hitIdx, hitU, hitV);
+		float hitT = TraceRay_RT(rayOrigX, rayOrigY, rayOrigZ,
+								 rayDirX, rayDirY, rayDirZ,
+								 vertices, triangles, triIndices, bvhNodes,
+								 hitIdx, hitU, hitV);
 
 		if (hitIdx < 0) {
-			// sky / miss
-			colorR += throughR * 0.02f;
-			colorG += throughG * 0.02f;
-			colorB += throughB * 0.03f;
+			// sky / miss — use sky color parameters
+			float upDot = rayDirY; // approximate up = Y
+			float skyR, skyG, skyB;
+			if (upDot > 0.0f) {
+				float t = fminf(upDot, 1.0f);
+				skyR = skyColorHorizon[0] * (1.0f - t) + skyColorZenith[0] * t;
+				skyG = skyColorHorizon[1] * (1.0f - t) + skyColorZenith[1] * t;
+				skyB = skyColorHorizon[2] * (1.0f - t) + skyColorZenith[2] * t;
+			} else {
+				float t = fminf(-upDot, 1.0f);
+				skyR = skyColorHorizon[0] * (1.0f - t) + skyColorGround[0] * t;
+				skyG = skyColorHorizon[1] * (1.0f - t) + skyColorGround[1] * t;
+				skyB = skyColorHorizon[2] * (1.0f - t) + skyColorGround[2] * t;
+			}
+			colorR += throughR * skyR * skyIntensity;
+			colorG += throughG * skyG * skyIntensity;
+			colorB += throughB * skyB * skyIntensity;
 			break;
 		}
 
@@ -256,108 +276,151 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 			alpha = texColor[3];
 		}
 
-		// alpha test: if perforated surface fails, skip through it
-		if (mat.coverage == 1 && alpha < mat.alphaTest && alphaSkips < MAX_ALPHA_SKIPS) {
-			rayOrigX = pX + rayDirX * 0.01f;
-			rayOrigY = pY + rayDirY * 0.01f;
-			rayOrigZ = pZ + rayDirZ * 0.01f;
+		// alpha test: perforated surface fails — skip through
+		if (mat.alphaTest > 0.0f && alpha < mat.alphaTest && alphaSkips < MAX_ALPHA_SKIPS) {
+			rayOrigX = pX + rayDirX * biasOffset;
+			rayOrigY = pY + rayDirY * biasOffset;
+			rayOrigZ = pZ + rayDirZ * biasOffset;
 			bounce--;
 			alphaSkips++;
 			continue;
 		}
 
-		// translucent with no explicit blend mode
-		if (mat.coverage == 2 && mat.blendMode == 0 && alpha < 0.5f && alphaSkips < MAX_ALPHA_SKIPS) {
-			rayOrigX = pX + rayDirX * 0.01f;
-			rayOrigY = pY + rayDirY * 0.01f;
-			rayOrigZ = pZ + rayDirZ * 0.01f;
+		// nearly invisible alpha blend — skip through
+		if (mat.blendMode == 1 && alpha < 0.05f && alphaSkips < MAX_ALPHA_SKIPS) {
+			rayOrigX = pX + rayDirX * biasOffset;
+			rayOrigY = pY + rayDirY * biasOffset;
+			rayOrigZ = pZ + rayDirZ * biasOffset;
 			bounce--;
 			alphaSkips++;
 			continue;
 		}
 
-		// translucent blending: sample blend texture, contribute color, continue ray
-		if (mat.coverage == 2 && mat.blendMode > 0 && alphaSkips < MAX_ALPHA_SKIPS) {
-			float blendR = mat.blendColor[0];
-			float blendG = mat.blendColor[1];
-			float blendB = mat.blendColor[2];
-			float blendA = mat.blendColor[3];
+		// lit noshadows decal overlays — blend over and continue
+		if (mat.noShadows && !mat.isAmbientOnly && mat.alphaTest == 0.0f
+			&& mat.transmission == 0.0f && mat.blendMode == 0 && alphaSkips < MAX_ALPHA_SKIPS) {
+			float lum = albR * 0.2126f + albG * 0.7152f + albB * 0.0722f;
+			float decalAlpha = (lum < 0.02f) ? 0.0f : alpha;
 
-			if (mat.blendTexture >= 0) {
-				float texSample[4];
-				SampleTexture(textures, mat.blendTexture, tu, tv, texSample);
-				blendR *= texSample[0];
-				blendG *= texSample[1];
-				blendB *= texSample[2];
-				blendA *= texSample[3];
+			if (decalAlpha > 0.05f) {
+				colorR += throughR * albR * decalAlpha * 0.5f;
+				colorG += throughG * albG * decalAlpha * 0.5f;
+				colorB += throughB * albB * decalAlpha * 0.5f;
+				throughR *= (1.0f - decalAlpha);
+				throughG *= (1.0f - decalAlpha);
+				throughB *= (1.0f - decalAlpha);
 			}
 
-			// sample alpha mask texture if available (maskcolor stages, e.g. glass)
-			float maskAlpha = 1.0f;
-			if (mat.alphaMaskTexture >= 0) {
-				float maskSample[4];
-				SampleTexture(textures, mat.alphaMaskTexture, tu, tv, maskSample);
-				maskAlpha = maskSample[3];
-			}
+			rayOrigX = pX + rayDirX * biasOffset;
+			rayOrigY = pY + rayDirY * biasOffset;
+			rayOrigZ = pZ + rayDirZ * biasOffset;
+			bounce--;
+			alphaSkips++;
+			continue;
+		}
 
-			if (mat.blendMode == 1) {
+		// ambient-only materials (self-illuminated overlays, particles, HUD)
+		if (mat.isAmbientOnly && alphaSkips < MAX_ALPHA_SKIPS) {
+			if (mat.blendMode == 2) {
 				// additive
-				colorR += throughR * blendR * maskAlpha * 0.01f;
-				colorG += throughG * blendG * maskAlpha * 0.01f;
-				colorB += throughB * blendB * maskAlpha * 0.01f;
-			} else if (mat.blendMode == 2) {
-				// alpha blend
-				float finalA = blendA * maskAlpha;
-				colorR += throughR * blendR * finalA;
-				colorG += throughG * blendG * finalA;
-				colorB += throughB * blendB * finalA;
-				float transmit = 1.0f - finalA;
-				throughR *= transmit;
-				throughG *= transmit;
-				throughB *= transmit;
+				colorR += throughR * albR * alpha * emissionBoost;
+				colorG += throughG * albG * alpha * emissionBoost;
+				colorB += throughB * albB * alpha * emissionBoost;
 			} else if (mat.blendMode == 3) {
-				// filter/modulate: lerp between no tint and full tint based on mask
-				float invMask = 1.0f - maskAlpha;
-				throughR *= (invMask + maskAlpha * blendR);
-				throughG *= (invMask + maskAlpha * blendG);
-				throughB *= (invMask + maskAlpha * blendB);
+				// modulate
+				throughR *= albR;
+				throughG *= albG;
+				throughB *= albB;
+			} else {
+				// default alpha-over
+				colorR += throughR * albR * alpha;
+				colorG += throughG * albG * alpha;
+				colorB += throughB * albB * alpha;
+				throughR *= (1.0f - alpha);
+				throughG *= (1.0f - alpha);
+				throughB *= (1.0f - alpha);
 			}
 
-			rayOrigX = pX + rayDirX * 0.01f;
-			rayOrigY = pY + rayDirY * 0.01f;
-			rayOrigZ = pZ + rayDirZ * 0.01f;
+			rayOrigX = pX + rayDirX * biasOffset;
+			rayOrigY = pY + rayDirY * biasOffset;
+			rayOrigZ = pZ + rayDirZ * biasOffset;
 			bounce--;
 			alphaSkips++;
 			continue;
 		}
 
-		// emission contribution from self-illuminating surfaces
-		float emitR = mat.emission[0], emitG = mat.emission[1], emitB = mat.emission[2];
+		// additive blending (non-ambient)
+		if (mat.blendMode == 2 && alphaSkips < MAX_ALPHA_SKIPS) {
+			colorR += throughR * albR * alpha;
+			colorG += throughG * albG * alpha;
+			colorB += throughB * albB * alpha;
+
+			rayOrigX = pX + rayDirX * biasOffset;
+			rayOrigY = pY + rayDirY * biasOffset;
+			rayOrigZ = pZ + rayDirZ * biasOffset;
+			bounce--;
+			alphaSkips++;
+			continue;
+		}
+
+		// modulate blending (non-ambient)
+		if (mat.blendMode == 3 && alphaSkips < MAX_ALPHA_SKIPS) {
+			throughR *= albR;
+			throughG *= albG;
+			throughB *= albB;
+
+			rayOrigX = pX + rayDirX * biasOffset;
+			rayOrigY = pY + rayDirY * biasOffset;
+			rayOrigZ = pZ + rayDirZ * biasOffset;
+			bounce--;
+			alphaSkips++;
+			continue;
+		}
+
+		// alpha blend (non-ambient) — partial transparency
+		if (mat.blendMode == 1 && alpha < 0.95f && alphaSkips < MAX_ALPHA_SKIPS) {
+			colorR += throughR * albR * alpha;
+			colorG += throughG * albG * alpha;
+			colorB += throughB * albB * alpha;
+			throughR *= (1.0f - alpha);
+			throughG *= (1.0f - alpha);
+			throughB *= (1.0f - alpha);
+
+			rayOrigX = pX + rayDirX * biasOffset;
+			rayOrigY = pY + rayDirY * biasOffset;
+			rayOrigZ = pZ + rayDirZ * biasOffset;
+			bounce--;
+			alphaSkips++;
+			continue;
+		}
+
+		// emission contribution
+		float emitR = mat.emission[0] * emissionBoost;
+		float emitG = mat.emission[1] * emissionBoost;
+		float emitB = mat.emission[2] * emissionBoost;
 		float emitLum = emitR * 0.2126f + emitG * 0.7152f + emitB * 0.0722f;
 		if (emitLum > 0.001f) {
 			colorR += throughR * emitR;
 			colorG += throughG * emitG;
 			colorB += throughB * emitB;
-
-			// strongly emissive surfaces don't need further lighting
 			if (emitLum > 0.5f) break;
 		}
 
-		// view direction (points toward camera)
+		// view direction (toward camera)
 		float vX = -rayDirX;
 		float vY = -rayDirY;
 		float vZ = -rayDirZ;
 
-		// accumulate direct lighting from all point lights
+		// direct lighting from all lights
 		float diffR = 0.0f, diffG = 0.0f, diffB = 0.0f;
 		float specR = 0.0f, specG = 0.0f, specB = 0.0f;
 
 		for (int li = 0; li < numLights; li++) {
 			const cudaLight_t& light = lights[li];
 
-			float lX, lY, lZ; // direction toward light (normalized)
-			float shadowDist; // max shadow ray distance
-			float atten = 0.0f; // computed attenuation
+			float lX, lY, lZ;
+			float shadowDist;
+			float atten = 0.0f;
 			float lightColR = light.color[0];
 			float lightColG = light.color[1];
 			float lightColB = light.color[2];
@@ -412,7 +475,6 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 				lZ = toL_z * iD;
 				shadowDist = d;
 
-				// distance attenuation
 				float R = light.radius;
 				if (d >= R) continue;
 
@@ -431,7 +493,7 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 					float t = (spotCos - cosHalfAngle) / (1.0f - cosHalfAngle + 1e-6f);
 					coneAtten = powf(t, light.coneFalloff);
 				} else {
-					continue; // outside cone
+					continue;
 				}
 
 				atten = light.intensity * distAtten * coneAtten;
@@ -446,13 +508,13 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 						float projU = fmaxf(0.0f, fminf(1.0f, (localX / localZ) * 0.5f + 0.5f));
 						float projV = fmaxf(0.0f, fminf(1.0f, (localY / localZ) * 0.5f + 0.5f));
 
-						float projR, projG, projB;
-						SampleTexture(textures[light.projectedTextureIndex], projU, projV, projR, projG, projB);
-						lightColR *= projR;
-						lightColG *= projG;
-						lightColB *= projB;
+						float projColor[4];
+						SampleTexture(textures, light.projectedTextureIndex, projU, projV, projColor);
+						lightColR *= projColor[0];
+						lightColG *= projColor[1];
+						lightColB *= projColor[2];
 					} else {
-						continue; // behind the spotlight
+						continue;
 					}
 				}
 			}
@@ -460,13 +522,12 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 			if (atten <= 0.0f) continue;
 
 			// shadow ray
-			float sOx = pX + nx * 0.1f;
-			float sOy = pY + ny * 0.1f;
-			float sOz = pZ + nz * 0.1f;
+			float sOx = pX + nx * biasOffset;
+			float sOy = pY + ny * biasOffset;
+			float sOz = pZ + nz * biasOffset;
 
-			if (numBVHNodes > 0 &&
-				TraceShadowRay(sOx, sOy, sOz, lX, lY, lZ, shadowDist,
-							   vertices, triangles, triIndices, bvhNodes, numBVHNodes)) {
+			if (TraceShadowRay_RT(sOx, sOy, sOz, lX, lY, lZ, shadowDist,
+								  vertices, triangles, triIndices, bvhNodes)) {
 				continue;
 			}
 
@@ -494,27 +555,26 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 			specB += lightColB * spec * atten;
 		}
 
-		// combine: ambient + diffuse * albedo + specular
-		float ambient = 0.012f;
-		float localR = albR * (ambient + diffR) + REFLECTIVITY * specR;
-		float localG = albG * (ambient + diffG) + REFLECTIVITY * specG;
-		float localB = albB * (ambient + diffB) + REFLECTIVITY * specB;
+		// combine: diffuse * albedo + specular (no ambient — Doom 3 pure darkness)
+		float localR = albR * diffR + REFLECTIVITY * specR * specularBoost;
+		float localG = albG * diffG + REFLECTIVITY * specG * specularBoost;
+		float localB = albB * diffB + REFLECTIVITY * specB * specularBoost;
 
-		// add local contribution weighted by current throughput
+		// add local contribution weighted by throughput
 		float oneMinusRefl = 1.0f - REFLECTIVITY;
 		colorR += throughR * localR * oneMinusRefl;
 		colorG += throughG * localG * oneMinusRefl;
 		colorB += throughB * localB * oneMinusRefl;
 
-		// reflection ray for next bounce
+		// Reflection ray for next bounce
 		float RdotN = rayDirX * nx + rayDirY * ny + rayDirZ * nz;
 		rayDirX = rayDirX - 2.0f * RdotN * nx;
 		rayDirY = rayDirY - 2.0f * RdotN * ny;
 		rayDirZ = rayDirZ - 2.0f * RdotN * nz;
 
-		rayOrigX = pX + nx * 0.01f;
-		rayOrigY = pY + ny * 0.01f;
-		rayOrigZ = pZ + nz * 0.01f;
+		rayOrigX = pX + nx * biasOffset;
+		rayOrigY = pY + ny * biasOffset;
+		rayOrigZ = pZ + nz * biasOffset;
 
 		// attenuate throughput by reflectivity
 		throughR *= REFLECTIVITY * albR;
@@ -522,23 +582,14 @@ __global__ __forceinline__ void TriangleDrawRayTracedKernel(
 		throughB *= REFLECTIVITY * albB;
 
 		// early out if throughput is negligible
-		if (throughR + throughG + throughB < 0.001f) {
+		if (throughR + throughG + throughB < earlyTermThreshold) {
 			break;
 		}
 	}
 
-	// tonemap and clamp
-	float r = fminf(colorR, 1.0f);
-	float g = fminf(colorG, 1.0f);
-	float b = fminf(colorB, 1.0f);
-
-	framebuffer[pixelIndex + 0] = r;
-	framebuffer[pixelIndex + 1] = g;
-	framebuffer[pixelIndex + 2] = b;
+	// write HDR framebuffer (tone mapping kernel handles LDR conversion)
+	framebuffer[pixelIndex + 0] = colorR;
+	framebuffer[pixelIndex + 1] = colorG;
+	framebuffer[pixelIndex + 2] = colorB;
 	framebuffer[pixelIndex + 3] = 1.0f;
-
-	outputBuffer[pixelIndex + 0] = (unsigned char)(r * 255.0f);
-	outputBuffer[pixelIndex + 1] = (unsigned char)(g * 255.0f);
-	outputBuffer[pixelIndex + 2] = (unsigned char)(b * 255.0f);
-	outputBuffer[pixelIndex + 3] = 255;
 }

@@ -6,7 +6,7 @@
 
 // extern console variables
 extern idCVar r_cuDebug;
-extern idCVar r_cuRenderMode;
+extern idCVar r_cuVolumetric;
 
 /*
 ========================
@@ -36,8 +36,7 @@ void idCudaRenderer::AddLight(
 	light.color[2] = color.z;
 	light.intensity = intensity;
 	light.radius = lightRadius;
-
-	// for directional lights, position stores the direction vector
+	light.volumetric = r_cuVolumetric.GetFloat();
 	if (type == 1) {
 		light.direction[0] = position.x;
 		light.direction[1] = position.y;
@@ -88,7 +87,7 @@ void idCudaRenderer::AddSpotLight(
 
     cudaLight_t light;
 	memset(&light, 0, sizeof(light));
-	light.type = 2;
+	light.type = 0;
 	light.position[0] = position.x;
 	light.position[1] = position.y;
 	light.position[2] = position.z;
@@ -102,6 +101,7 @@ void idCudaRenderer::AddSpotLight(
 	light.radius = lightRadius;
 	light.area[0] = light.area[1] = light.area[2] = 0.0f;
 	light.textureIndex = -1;
+	light.volumetric = r_cuVolumetric.GetFloat() * 2.0f;
 	light.coneAngle = coneAngle;
 	light.coneFalloff = coneFalloff;
 

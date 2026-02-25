@@ -10,532 +10,898 @@
 #include "renderer_cuda/cu_renderer_material.cuh"
 
 /*
-========================
-PathTracingKernel
-========================
+=================================================================================
+Ray-Triangle Intersection (Möller-Trumbore algorithm)
+=================================================================================
 */
-__global__ __forceinline__ void PathTracingKernel(
+__device__ bool IntersectTriangle(
+	const cudaRay_t& ray,
+	const cudaVertex_t* vertices,
+	const cudaTriangle_t& triangle,
+	const cudaMaterial_t* materials,
+	cudaHitInfo_t& hitInfo
+) {
+	const cudaVertex_t& v0 = vertices[triangle.vertexIndices[0]];
+	const cudaVertex_t& v1 = vertices[triangle.vertexIndices[1]];
+	const cudaVertex_t& v2 = vertices[triangle.vertexIndices[2]];
+
+	float edge1[3] = {
+		v1.position[0] - v0.position[0],
+		v1.position[1] - v0.position[1],
+		v1.position[2] - v0.position[2]
+	};
+	float edge2[3] = {
+		v2.position[0] - v0.position[0],
+		v2.position[1] - v0.position[1],
+		v2.position[2] - v0.position[2]
+	};
+
+	float h[3];
+	cross3(ray.direction, edge2, h);
+	float a = dot3(edge1, h);
+
+	if (fabsf(a) < 1e-6f) return false;
+
+	float f = 1.0f / a;
+	float s[3] = {
+		ray.origin[0] - v0.position[0],
+		ray.origin[1] - v0.position[1],
+		ray.origin[2] - v0.position[2]
+	};
+
+	float u = f * dot3(s, h);
+	if (u < 0.0f || u > 1.0f) return false;
+
+	float q[3];
+	cross3(s, edge1, q);
+	float v = f * dot3(ray.direction, q);
+	if (v < 0.0f || u + v > 1.0f) return false;
+
+	float t = f * dot3(edge2, q);
+	if (t > ray.tMin && t < ray.tMax && t < hitInfo.t) {
+		hitInfo.hit = true;
+		hitInfo.t = t;
+
+		hitInfo.position[0] = ray.origin[0] + t * ray.direction[0];
+		hitInfo.position[1] = ray.origin[1] + t * ray.direction[1];
+		hitInfo.position[2] = ray.origin[2] + t * ray.direction[2];
+
+		float w = 1.0f - u - v;
+		hitInfo.normal[0] = w * v0.normal[0] + u * v1.normal[0] + v * v2.normal[0];
+		hitInfo.normal[1] = w * v0.normal[1] + u * v1.normal[1] + v * v2.normal[1];
+		hitInfo.normal[2] = w * v0.normal[2] + u * v1.normal[2] + v * v2.normal[2];
+		normalize3(hitInfo.normal);
+
+		hitInfo.tangent[0] = w * v0.tangent[0] + u * v1.tangent[0] + v * v2.tangent[0];
+		hitInfo.tangent[1] = w * v0.tangent[1] + u * v1.tangent[1] + v * v2.tangent[1];
+		hitInfo.tangent[2] = w * v0.tangent[2] + u * v1.tangent[2] + v * v2.tangent[2];
+		normalize3(hitInfo.tangent);
+
+		hitInfo.binormal[0] = w * v0.binormal[0] + u * v1.binormal[0] + v * v2.binormal[0];
+		hitInfo.binormal[1] = w * v0.binormal[1] + u * v1.binormal[1] + v * v2.binormal[1];
+		hitInfo.binormal[2] = w * v0.binormal[2] + u * v1.binormal[2] + v * v2.binormal[2];
+		normalize3(hitInfo.binormal);
+
+		hitInfo.texcoord[0] = w * v0.texcoord[0] + u * v1.texcoord[0] + v * v2.texcoord[0];
+		hitInfo.texcoord[1] = w * v0.texcoord[1] + u * v1.texcoord[1] + v * v2.texcoord[1];
+
+		hitInfo.barycentrics[0] = w;
+		hitInfo.barycentrics[1] = u;
+		hitInfo.barycentrics[2] = v;
+
+		hitInfo.materialIndex = triangle.materialIndex;
+
+		return true;
+	}
+
+	return false;
+}
+
+/*
+=================================================================================
+BVH Traversal
+=================================================================================
+*/
+__device__ bool IntersectBVH(
+	const cudaRay_t& ray,
 	const cudaVertex_t* vertices,
 	const cudaTriangle_t* triangles,
+	const cudaBVHNode_t* nodes,
+	const int* triIndices,
+	const cudaMaterial_t* materials,
+	cudaHitInfo_t& hitInfo
+) {
+	bool foundHit = false;
+
+	int stack[128];
+	int stackPtr = 0;
+	stack[stackPtr++] = 0;
+
+	while (stackPtr > 0 && stackPtr < 128) {
+		int nodeIndex = stack[--stackPtr];
+		const cudaBVHNode_t& node = nodes[nodeIndex];
+
+		float tmin = ray.tMin;
+		float tmax = foundHit ? hitInfo.t : ray.tMax;
+
+		for (int i = 0; i < 3; i++) {
+			if (fabsf(ray.direction[i]) < 1e-6f) {
+				if (ray.origin[i] < node.bounds[i] || ray.origin[i] > node.bounds[i + 3]) {
+					goto skip_node;
+				}
+				continue;
+			}
+
+			float invD = 1.0f / ray.direction[i];
+			float t0 = (node.bounds[i] - ray.origin[i]) * invD;
+			float t1 = (node.bounds[i + 3] - ray.origin[i]) * invD;
+
+			if (invD < 0.0f) {
+				float tmp = t0; t0 = t1; t1 = tmp;
+			}
+
+			tmin = fmaxf(tmin, t0);
+			tmax = fminf(tmax, t1);
+
+			if (tmax <= tmin) goto skip_node;
+		}
+
+		if (node.leftChild == -1) {
+			for (int i = node.firstPrimitive; i < node.firstPrimitive + node.primitiveCount; i++) {
+				int triIdx = triIndices[i];
+				if (IntersectTriangle(ray, vertices, triangles[triIdx], materials, hitInfo)) {
+					hitInfo.triangleIndex = triIdx;
+					foundHit = true;
+				}
+			}
+		} else {
+			if (stackPtr <= 126) {
+				const cudaBVHNode_t& leftNode = nodes[node.leftChild];
+				const cudaBVHNode_t& rightNode = nodes[node.rightChild];
+
+				float leftDot =
+					((leftNode.bounds[0] + leftNode.bounds[3]) - 2.0f * ray.origin[0]) * ray.direction[0] +
+					((leftNode.bounds[1] + leftNode.bounds[4]) - 2.0f * ray.origin[1]) * ray.direction[1] +
+					((leftNode.bounds[2] + leftNode.bounds[5]) - 2.0f * ray.origin[2]) * ray.direction[2];
+				float rightDot =
+					((rightNode.bounds[0] + rightNode.bounds[3]) - 2.0f * ray.origin[0]) * ray.direction[0] +
+					((rightNode.bounds[1] + rightNode.bounds[4]) - 2.0f * ray.origin[1]) * ray.direction[1] +
+					((rightNode.bounds[2] + rightNode.bounds[5]) - 2.0f * ray.origin[2]) * ray.direction[2];
+
+				if (leftDot < rightDot) {
+					stack[stackPtr++] = node.rightChild;
+					stack[stackPtr++] = node.leftChild;
+				} else {
+					stack[stackPtr++] = node.leftChild;
+					stack[stackPtr++] = node.rightChild;
+				}
+			}
+		}
+
+		skip_node:;
+	}
+
+	return foundHit;
+}
+
+// include sampling after intersection is defined (sampling calls IntersectBVH)
+#include "renderer_cuda/cu_renderer_sampling.cuh"
+
+/*
+=================================================================================
+PathTracingKernel - Full PBR path tracing
+=================================================================================
+*/
+__global__ void PathTracingKernel(
+	const cudaVertex_t* vertices,
+	const cudaTriangle_t* triangles,
+	const cudaBVHNode_t* bvhNodes,
+	const int* triIndices,
 	const cudaMaterial_t* materials,
 	const cudaTexture_t* textures,
 	const cudaLight_t* lights,
 	int numLights,
-	const int* triIndices,
-	const cudaBVHNode_t* bvhNodes,
-	int numBVHNodes,
 	float* framebuffer,
-	unsigned char* outputBuffer,
 	int width,
 	int height,
-	int numTriangles,
 	const float* cameraPos,
 	const float* cameraForward,
 	const float* cameraRight,
 	const float* cameraUp,
-	float fov_x,
-	float fov_y,
-	unsigned int frameNumber
+	float fov,
+	float fovY,
+	int samplesPerPixel,
+	int maxDepth,
+	int maxLightSamples,
+	int frameIndex,
+	float emissionBoost,
+	float indirectProb,
+	int rrEnabled,
+	int rrMinBounces,
+	float rrSurvivalMin,
+	float earlyTermThreshold,
+	float fireflyClamp,
+	float throughputClamp,
+	float rayOffset,
+	float specularBoost,
+	float skyIntensity,
+	const float* skyColorZenith,
+	const float* skyColorHorizon,
+	const float* skyColorGround,
+	float volumetricDensity,
+	int volumetricSteps,
+	float volumetricAnisotropy,
+	float volFalloff,
+	float volMaxDist
 ) {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-	if (x >= width || y >= height) {
-		return;
-	}
+	if (x >= width || y >= height) return;
 
 	int pixelIndex = (y * width + x) * 4;
 
-	// per-pixel RNG state seeded from pixel position and frame number
-	unsigned int rng = cupt_hash((unsigned int)(y * width + x) ^ cupt_hash(frameNumber + 1u));
+	// per-pixel RNG with curand
+	unsigned long long pixelSeed = (unsigned long long)(y * width + x) * 1000003ULL + (unsigned long long)frameIndex * 999983ULL;
+	curandState randState;
+	curand_init(pixelSeed, 0, 0, &randState);
 
-	// generate primary ray
-	float halfTanX = tanf(fov_x * 0.5f * 3.14159265f / 180.0f);
-	float halfTanY = tanf(fov_y * 0.5f * 3.14159265f / 180.0f);
+	float color[3] = { 0.0f, 0.0f, 0.0f };
 
-	float su = (2.0f * ((float)x + 0.5f) / (float)width  - 1.0f) * halfTanX;
-	float sv = (2.0f * ((float)y + 0.5f) / (float)height - 1.0f) * halfTanY;
+	for (int sample = 0; sample < samplesPerPixel; sample++) {
+		// primary ray with jitter
+		float jitterX = curand_uniform(&randState) - 0.5f;
+		float jitterY = curand_uniform(&randState) - 0.5f;
 
-	float rayDirX = cameraForward[0] + su * cameraRight[0] + sv * cameraUp[0];
-	float rayDirY = cameraForward[1] + su * cameraRight[1] + sv * cameraUp[1];
-	float rayDirZ = cameraForward[2] + su * cameraRight[2] + sv * cameraUp[2];
+		float u = ((float)(x) + 0.5f + jitterX) / (float)width * 2.0f - 1.0f;
+		float v = ((float)(y) + 0.5f + jitterY) / (float)height * 2.0f - 1.0f;
 
-	float il = rsqrtf(rayDirX * rayDirX + rayDirY * rayDirY + rayDirZ * rayDirZ);
-	rayDirX *= il;
-	rayDirY *= il;
-	rayDirZ *= il;
+		float tanHalfFovX = tanf(fov * (float)M_PI / 360.0f);
+		float tanHalfFovY = tanf(fovY * (float)M_PI / 360.0f);
 
-	float rayOrigX = cameraPos[0];
-	float rayOrigY = cameraPos[1];
-	float rayOrigZ = cameraPos[2];
+		cudaRay_t ray;
+		ray.origin[0] = cameraPos[0];
+		ray.origin[1] = cameraPos[1];
+		ray.origin[2] = cameraPos[2];
 
-	// path tracing loop
-	float colorR = 0.0f, colorG = 0.0f, colorB = 0.0f;
-	float throughR = 1.0f, throughG = 1.0f, throughB = 1.0f;
+		ray.direction[0] = cameraForward[0] + u * cameraRight[0] * tanHalfFovX + v * cameraUp[0] * tanHalfFovY;
+		ray.direction[1] = cameraForward[1] + u * cameraRight[1] * tanHalfFovX + v * cameraUp[1] * tanHalfFovY;
+		ray.direction[2] = cameraForward[2] + u * cameraRight[2] * tanHalfFovX + v * cameraUp[2] * tanHalfFovY;
+		normalize3(ray.direction);
 
-	// sky ambient parameters
-	const float SKY_INTENSITY   = 0.15f;
-	const float SKY_ZENITH_R    = 0.15f, SKY_ZENITH_G = 0.18f, SKY_ZENITH_B = 0.30f;
-	const float SKY_HORIZON_R   = 0.25f, SKY_HORIZON_G = 0.25f, SKY_HORIZON_B = 0.28f;
-	const float SKY_GROUND_R    = 0.10f, SKY_GROUND_G = 0.09f, SKY_GROUND_B = 0.08f;
+		ray.tMin = rayOffset;
+		ray.tMax = 1e10f;
 
-	const int MAX_BOUNCES = 6;
-	int alphaSkips = 0;
-	const int MAX_ALPHA_SKIPS = 8;
-	for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+		float pathThroughput[3] = { 1.0f, 1.0f, 1.0f };
+		float pathRadiance[3] = { 0.0f, 0.0f, 0.0f };
 
-		int hitIdx;
-		float hitU, hitV;
-		float hitT = TraceRay(rayOrigX, rayOrigY, rayOrigZ,
-							  rayDirX, rayDirY, rayDirZ,
-							  vertices, triangles, triIndices, bvhNodes,
-							  numBVHNodes, numTriangles,
-							  hitIdx, hitU, hitV);
+		int depth = 0;
+		const int maxTransparentPasses = maxDepth * 8;  // generous budget for overlapping particles/decals
+		for (int iteration = 0; iteration < maxTransparentPasses && depth < maxDepth; iteration++) {
+			cudaHitInfo_t hitInfo;
+			hitInfo.hit = false;
+			hitInfo.t = ray.tMax;
+			hitInfo.materialIndex = 0;
+			hitInfo.triangleIndex = 0;
+			hitInfo.barycentrics[0] = 0.0f;
+			hitInfo.barycentrics[1] = 0.0f;
+			hitInfo.barycentrics[2] = 0.0f;
 
-		if (hitIdx < 0) {
-			// sky ambient: gradient based on ray direction
-			float skyT = rayDirZ * 0.5f + 0.5f; // map [-1,1] -> [0,1]
-			skyT = fmaxf(0.0f, fminf(1.0f, skyT));
-
-			float skyR, skyG, skyB;
-			if (skyT > 0.5f) {
-				// upper hemisphere: horizon -> zenith
-				float s = (skyT - 0.5f) * 2.0f;
-				skyR = SKY_HORIZON_R + (SKY_ZENITH_R - SKY_HORIZON_R) * s;
-				skyG = SKY_HORIZON_G + (SKY_ZENITH_G - SKY_HORIZON_G) * s;
-				skyB = SKY_HORIZON_B + (SKY_ZENITH_B - SKY_HORIZON_B) * s;
-			} else {
-				// lower hemisphere: ground -> horizon
-				float s = skyT * 2.0f;
-				skyR = SKY_GROUND_R + (SKY_HORIZON_R - SKY_GROUND_R) * s;
-				skyG = SKY_GROUND_G + (SKY_HORIZON_G - SKY_GROUND_G) * s;
-				skyB = SKY_GROUND_B + (SKY_HORIZON_B - SKY_GROUND_B) * s;
-			}
-
-			colorR += throughR * skyR * SKY_INTENSITY;
-			colorG += throughG * skyG * SKY_INTENSITY;
-			colorB += throughB * skyB * SKY_INTENSITY;
-			break;
-		}
-
-		const cudaTriangle_t& tri = triangles[hitIdx];
-		int i0 = tri.vertexIndices[0];
-		int i1 = tri.vertexIndices[1];
-		int i2 = tri.vertexIndices[2];
-
-		float w0 = 1.0f - hitU - hitV;
-		float w1 = hitU;
-		float w2 = hitV;
-
-		// interpolate shading normal
-		float nx = w0 * vertices[i0].normal[0] + w1 * vertices[i1].normal[0] + w2 * vertices[i2].normal[0];
-		float ny = w0 * vertices[i0].normal[1] + w1 * vertices[i1].normal[1] + w2 * vertices[i2].normal[1];
-		float nz = w0 * vertices[i0].normal[2] + w1 * vertices[i1].normal[2] + w2 * vertices[i2].normal[2];
-		float nIL = rsqrtf(nx * nx + ny * ny + nz * nz + 1e-12f);
-		nx *= nIL;
-		ny *= nIL;
-		nz *= nIL;
-
-		// ensure normal faces the incoming ray direction
-		if (nx * rayDirX + ny * rayDirY + nz * rayDirZ > 0.0f) {
-			nx = -nx; ny = -ny; nz = -nz;
-		}
-
-		// interpolate tangent
-		float geoTangent[3];
-		geoTangent[0] = w0 * vertices[i0].tangent[0] + w1 * vertices[i1].tangent[0] + w2 * vertices[i2].tangent[0];
-		geoTangent[1] = w0 * vertices[i0].tangent[1] + w1 * vertices[i1].tangent[1] + w2 * vertices[i2].tangent[1];
-		geoTangent[2] = w0 * vertices[i0].tangent[2] + w1 * vertices[i1].tangent[2] + w2 * vertices[i2].tangent[2];
-		float tILen = rsqrtf(geoTangent[0] * geoTangent[0] + geoTangent[1] * geoTangent[1] + geoTangent[2] * geoTangent[2] + 1e-12f);
-		geoTangent[0] *= tILen; geoTangent[1] *= tILen; geoTangent[2] *= tILen;
-
-		// interpolate bitangent
-		float geoBitangent[3];
-		geoBitangent[0] = w0 * vertices[i0].bitangent[0] + w1 * vertices[i1].bitangent[0] + w2 * vertices[i2].bitangent[0];
-		geoBitangent[1] = w0 * vertices[i0].bitangent[1] + w1 * vertices[i1].bitangent[1] + w2 * vertices[i2].bitangent[1];
-		geoBitangent[2] = w0 * vertices[i0].bitangent[2] + w1 * vertices[i1].bitangent[2] + w2 * vertices[i2].bitangent[2];
-		float bILen = rsqrtf(geoBitangent[0] * geoBitangent[0] + geoBitangent[1] * geoBitangent[1] + geoBitangent[2] * geoBitangent[2] + 1e-12f);
-		geoBitangent[0] *= bILen; geoBitangent[1] *= bILen; geoBitangent[2] *= bILen;
-
-		// interpolate texcoord
-		float tu = w0 * vertices[i0].texcoord[0] + w1 * vertices[i1].texcoord[0] + w2 * vertices[i2].texcoord[0];
-		float tv = w0 * vertices[i0].texcoord[1] + w1 * vertices[i1].texcoord[1] + w2 * vertices[i2].texcoord[1];
-
-		// hit position
-		float pX = rayOrigX + rayDirX * hitT;
-		float pY = rayOrigY + rayDirY * hitT;
-		float pZ = rayOrigZ + rayDirZ * hitT;
-
-		// evaluate material (albedo, normal map, specular, emission)
-		const cudaMaterial_t& mat = materials[tri.materialIndex];
-		float geoNormal[3] = { nx, ny, nz };
-		float albedo[3], shadingNormal[3], specColor[3], emissive[3];
-		float alpha;
-		EvaluateMaterial(mat, textures, tu, tv, geoNormal, geoTangent, geoBitangent,
-						 albedo, shadingNormal, specColor, emissive, alpha);
-
-		// alpha test: if perforated surface fails, skip through it
-		if (mat.coverage == 1 && alpha < mat.alphaTest && alphaSkips < MAX_ALPHA_SKIPS) {
-			// advance ray origin past the hit surface and re-trace
-			rayOrigX = pX + rayDirX * 0.01f;
-			rayOrigY = pY + rayDirY * 0.01f;
-			rayOrigZ = pZ + rayDirZ * 0.01f;
-			bounce--; // don't consume a bounce for alpha-tested skips
-			alphaSkips++;
-			continue;
-		}
-
-		// translucent with no explicit blend mode
-		if (mat.coverage == 2 && mat.blendMode == 0 && alpha < 0.5f && alphaSkips < MAX_ALPHA_SKIPS) {
-			rayOrigX = pX + rayDirX * 0.01f;
-			rayOrigY = pY + rayDirY * 0.01f;
-			rayOrigZ = pZ + rayDirZ * 0.01f;
-			bounce--;
-			alphaSkips++;
-			continue;
-		}
-
-		// translucent blending: sample blend texture, contribute color, continue ray
-		if (mat.coverage == 2 && mat.blendMode > 0 && alphaSkips < MAX_ALPHA_SKIPS) {
-			float blendR = mat.blendColor[0];
-			float blendG = mat.blendColor[1];
-			float blendB = mat.blendColor[2];
-			float blendA = mat.blendColor[3];
-
-			// sample blend texture if available
-			if (mat.blendTexture >= 0) {
-				float texSample[4];
-				SampleTexture(textures, mat.blendTexture, tu, tv, texSample);
-				blendR *= texSample[0];
-				blendG *= texSample[1];
-				blendB *= texSample[2];
-				blendA *= texSample[3];
-			}
-
-			// sample alpha mask texture if available 
-			float maskAlpha = 1.0f;
-			if (mat.alphaMaskTexture >= 0) {
-				float maskSample[4];
-				SampleTexture(textures, mat.alphaMaskTexture, tu, tv, maskSample);
-				maskAlpha = maskSample[3];
-			}
-
-			if (mat.blendMode == 1) {
-				// additive: add surface color to accumulator, ray passes through fully
-				colorR += throughR * blendR * maskAlpha * 0.01f;
-				colorG += throughG * blendG * maskAlpha * 0.01f;
-				colorB += throughB * blendB * maskAlpha * 0.01f;
-			} else if (mat.blendMode == 2) {
-				// alpha blend: contribute alpha * color, attenuate throughput by (1 - alpha)
-				float finalA = blendA * maskAlpha;
-				colorR += throughR * blendR * finalA;
-				colorG += throughG * blendG * finalA;
-				colorB += throughB * blendB * finalA;
-				float transmit = 1.0f - finalA;
-				throughR *= transmit;
-				throughG *= transmit;
-				throughB *= transmit;
-			} else if (mat.blendMode == 3) {
-				// filter/modulate: tint throughput by surface color 
-				float invMask = 1.0f - maskAlpha;
-				throughR *= (invMask + maskAlpha * blendR);
-				throughG *= (invMask + maskAlpha * blendG);
-				throughB *= (invMask + maskAlpha * blendB);
-			}
-
-			// continue ray through the blended surface
-			rayOrigX = pX + rayDirX * 0.01f;
-			rayOrigY = pY + rayDirY * 0.01f;
-			rayOrigZ = pZ + rayDirZ * 0.01f;
-			bounce--;
-			alphaSkips++;
-			continue;
-		}
-
-		// accumulate emission weighted by current throughput
-		float emitR = emissive[0], emitG = emissive[1], emitB = emissive[2];
-		float emitLum = emitR * 0.2126f + emitG * 0.7152f + emitB * 0.0722f;
-		if (emitLum > 0.001f) {
-			colorR += throughR * emitR;
-			colorG += throughG * emitG;
-			colorB += throughB * emitB;
-		}
-
-		// use perturbed shading normal for lighting
-		nx = shadingNormal[0];
-		ny = shadingNormal[1];
-		nz = shadingNormal[2];
-
-		// re-ensure perturbed normal faces the incoming ray
-		if (nx * rayDirX + ny * rayDirY + nz * rayDirZ > 0.0f) {
-			nx = -nx; ny = -ny; nz = -nz;
-		}
-
-		float albR = albedo[0];
-		float albG = albedo[1];
-		float albB = albedo[2];
-
-		// direct light sampling (Next Event Estimation)
-		int lightsToSample = (numLights > 0) ? ((numLights < 4) ? numLights : 4) : 0;
-		for (int ls = 0; ls < lightsToSample; ls++) {
-			// randomly pick one light and weight
-			int li = (int)(cupt_random(rng) * (float)numLights);
-			rng = cupt_hash(rng);
-			if (li >= numLights) li = numLights - 1;
-
-			const cudaLight_t& light = lights[li];
-			float lDirX, lDirY, lDirZ; // direction toward light
-			float shadowDist; // max distance for shadow ray
-			float atten = 0.0f; // light attenuation
-
-			if (light.type == 0) {
-				// point light
-				float toL_x = light.position[0] - pX;
-				float toL_y = light.position[1] - pY;
-				float toL_z = light.position[2] - pZ;
-
-				float dSq = toL_x * toL_x + toL_y * toL_y + toL_z * toL_z;
-				float d   = sqrtf(dSq + 1e-12f);
-				float iD  = 1.0f / d;
-				lDirX = toL_x * iD;
-				lDirY = toL_y * iD;
-				lDirZ = toL_z * iD;
-				shadowDist = d;
-
-				float R = light.radius;
-				if (d < R) {
-					// Doom 3 style: 1 - (d/R)^2 with smooth hermite at boundary
-					float ratio  = d / R;
-					float r2 = ratio * ratio;
-					// smoothstep-like: keeps light bright near center, gentle fade at edge
-					float falloff = 1.0f - r2;
-					atten = light.intensity * falloff;
-				}
-			} else if (light.type == 1) {
-				// directional light
-				lDirX = light.direction[0];
-				lDirY = light.direction[1];
-				lDirZ = light.direction[2];
-
-				// normalize (should already be normalized, but be safe)
-				float dIL = rsqrtf(lDirX * lDirX + lDirY * lDirY + lDirZ * lDirZ + 1e-12f);
-				lDirX *= dIL;
-				lDirY *= dIL;
-				lDirZ *= dIL;
-
-				shadowDist = 10000.0f; // effectively infinite
-				atten = light.intensity; // no distance falloff
-			} else {
-				// projected / spot light
-				float toL_x = light.position[0] - pX;
-				float toL_y = light.position[1] - pY;
-				float toL_z = light.position[2] - pZ;
-
-				float dSq = toL_x * toL_x + toL_y * toL_y + toL_z * toL_z;
-				float d   = sqrtf(dSq + 1e-12f);
-				float iD  = 1.0f / d;
-				lDirX = toL_x * iD;
-				lDirY = toL_y * iD;
-				lDirZ = toL_z * iD;
-				shadowDist = d;
-
-				// distance attenuation (same soft falloff as point lights)
-				float R = light.radius;
-				float distAtten = 0.0f;
-				if (d < R) {
-					float ratio  = d / R;
-					float r2 = ratio * ratio;
-					distAtten = 1.0f - r2;
-				}
-
-				// cone attenuation: angle between -toLight and spotlight direction
-				float negLX = -lDirX;
-				float negLY = -lDirY;
-				float negLZ = -lDirZ;
-				float spotCos = negLX * light.direction[0] + negLY * light.direction[1] + negLZ * light.direction[2];
-				float cosHalfAngle = cosf(light.coneAngle);
-
-				float coneAtten = 0.0f;
-				if (spotCos > cosHalfAngle) {
-					// inside cone: smooth falloff from center to edge
-					float t = (spotCos - cosHalfAngle) / (1.0f - cosHalfAngle + 1e-6f);
-					coneAtten = powf(t, light.coneFalloff);
-				}
-
-				// optional projected texture modulation
-				float projR = 1.0f, projG = 1.0f, projB = 1.0f;
-				if (light.projectedTextureIndex >= 0 && textures != nullptr) {
-					// project hit point into spotlight's local frame
-					float localX = toL_x * light.right[0] + toL_y * light.right[1] + toL_z * light.right[2];
-					float localY = toL_x * light.up[0]    + toL_y * light.up[1]    + toL_z * light.up[2];
-					float localZ = toL_x * light.direction[0] + toL_y * light.direction[1] + toL_z * light.direction[2];
-
-					if (localZ > 0.001f) {
-						// perspective divide to get UV in [0,1]
-						float projU = (localX / localZ) * 0.5f + 0.5f;
-						float projV = (localY / localZ) * 0.5f + 0.5f;
-
-						// clamp to valid range
-						projU = fmaxf(0.0f, fminf(1.0f, projU));
-						projV = fmaxf(0.0f, fminf(1.0f, projV));
-
-						float texSample[4];
-						SampleTexture(textures, light.projectedTextureIndex, projU, projV, texSample);
-						projR = texSample[0];
-						projG = texSample[1];
-						projB = texSample[2];
+			if (!IntersectBVH(ray, vertices, triangles, bvhNodes, triIndices, materials, hitInfo)) {
+				// sky dome - primary rays only (bounce misses return black for Doom 3 darkness)
+				if (depth == 0 && skyIntensity > 0.0f) {
+					float upDot = ray.direction[2];
+					float skyColor[3];
+					if (upDot > 0.0f) {
+						float t = fminf(1.0f, upDot * 2.0f);
+						skyColor[0] = skyColorHorizon[0] * (1.0f - t) + skyColorZenith[0] * t;
+						skyColor[1] = skyColorHorizon[1] * (1.0f - t) + skyColorZenith[1] * t;
+						skyColor[2] = skyColorHorizon[2] * (1.0f - t) + skyColorZenith[2] * t;
 					} else {
-						projR = projG = projB = 0.0f; // behind the spotlight
+						float t = fminf(1.0f, -upDot * 3.0f);
+						skyColor[0] = skyColorHorizon[0] * (1.0f - t) + skyColorGround[0] * t;
+						skyColor[1] = skyColorHorizon[1] * (1.0f - t) + skyColorGround[1] * t;
+						skyColor[2] = skyColorHorizon[2] * (1.0f - t) + skyColorGround[2] * t;
+					}
+					pathRadiance[0] += pathThroughput[0] * skyColor[0] * skyIntensity;
+					pathRadiance[1] += pathThroughput[1] * skyColor[1] * skyIntensity;
+					pathRadiance[2] += pathThroughput[2] * skyColor[2] * skyIntensity;
+				}
+				break;
+			}
+
+			const cudaMaterial_t& material = materials[hitInfo.materialIndex];
+
+			// ---------------------------------------------------------------
+			// Apply texture transforms to UV
+			// ---------------------------------------------------------------
+			float tu = hitInfo.texcoord[0];
+			float tv = hitInfo.texcoord[1];
+
+			bool hasTransform = (material.texTransform[0] != 1.0f || material.texTransform[1] != 1.0f ||
+								material.texTransform[2] != 0.0f || material.texTransform[3] != 0.0f ||
+								material.texTransform[4] != 0.0f);
+
+			if (hasTransform) {
+				tu *= material.texTransform[0];
+				tv *= material.texTransform[1];
+				if (material.texTransform[2] != 0.0f) {
+					float angle = material.texTransform[2];
+					float cosA = cosf(angle);
+					float sinA = sinf(angle);
+					float uRot = tu * cosA - tv * sinA;
+					float vRot = tu * sinA + tv * cosA;
+					tu = uRot;
+					tv = vRot;
+				}
+				tu += material.texTransform[3];
+				tv += material.texTransform[4];
+				tu = tu - floorf(tu);
+				tv = tv - floorf(tv);
+			}
+
+			// ---------------------------------------------------------------
+			// Sample albedo texture
+			// ---------------------------------------------------------------
+			float albedo[4];
+			if (material.albedoTexture >= 0 && textures) {
+				SampleTexture(textures, material.albedoTexture, tu, tv, albedo);
+				albedo[0] *= material.albedo[0];
+				albedo[1] *= material.albedo[1];
+				albedo[2] *= material.albedo[2];
+				albedo[3] *= material.albedo[3];
+			} else {
+				albedo[0] = material.albedo[0];
+				albedo[1] = material.albedo[1];
+				albedo[2] = material.albedo[2];
+				albedo[3] = material.albedo[3];
+			}
+
+			// ---------------------------------------------------------------
+			// Normal mapping with RXGB format & degenerate tangent frame
+			// ---------------------------------------------------------------
+			float surfaceNormal[3];
+			surfaceNormal[0] = hitInfo.normal[0];
+			surfaceNormal[1] = hitInfo.normal[1];
+			surfaceNormal[2] = hitInfo.normal[2];
+
+			if (material.normalTexture >= 0 && textures) {
+				float normalMap[4];
+				SampleTexture(textures, material.normalTexture, tu, tv, normalMap);
+
+				// RXGB format: A=X, G=Y, B=Z
+				float tangentNormal[3];
+				tangentNormal[0] = (normalMap[3] * 2.0f - 1.0f) * material.bumpScale;
+				tangentNormal[1] = (normalMap[1] * 2.0f - 1.0f) * material.bumpScale;
+				tangentNormal[2] = (normalMap[2] * 2.0f - 1.0f);
+
+				float T[3] = { hitInfo.tangent[0], hitInfo.tangent[1], hitInfo.tangent[2] };
+				float B[3] = { hitInfo.binormal[0], hitInfo.binormal[1], hitInfo.binormal[2] };
+				float N[3] = { hitInfo.normal[0], hitInfo.normal[1], hitInfo.normal[2] };
+
+				// Fabricate tangent frame if degenerate
+				float tLen = T[0] * T[0] + T[1] * T[1] + T[2] * T[2];
+				float bLen = B[0] * B[0] + B[1] * B[1] + B[2] * B[2];
+
+				if (tLen < 0.001f || bLen < 0.001f) {
+					if (fabsf(N[2]) < 0.999f) {
+						float invLen = 1.0f / sqrtf(N[0] * N[0] + N[1] * N[1]);
+						T[0] = -N[1] * invLen; T[1] = N[0] * invLen; T[2] = 0.0f;
+					} else {
+						T[0] = 1.0f; T[1] = 0.0f; T[2] = 0.0f;
+					}
+					cross3(N, T, B);
+				}
+
+				surfaceNormal[0] = T[0] * tangentNormal[0] + B[0] * tangentNormal[1] + N[0] * tangentNormal[2];
+				surfaceNormal[1] = T[1] * tangentNormal[0] + B[1] * tangentNormal[1] + N[1] * tangentNormal[2];
+				surfaceNormal[2] = T[2] * tangentNormal[0] + B[2] * tangentNormal[1] + N[2] * tangentNormal[2];
+
+				float len = sqrtf(surfaceNormal[0] * surfaceNormal[0] + surfaceNormal[1] * surfaceNormal[1] + surfaceNormal[2] * surfaceNormal[2]);
+				if (len > 0.001f) {
+					surfaceNormal[0] /= len;
+					surfaceNormal[1] /= len;
+					surfaceNormal[2] /= len;
+				}
+			}
+
+			// ---------------------------------------------------------------
+			// Specular map -> PBR roughness / metallic / spec color
+			// ---------------------------------------------------------------
+			float metallic = material.metallic;
+			float roughness = material.roughness;
+			float specColor[3] = { 1.0f, 1.0f, 1.0f };
+
+			if (material.specularTexture >= 0 && textures) {
+				float specularMap[4];
+				SampleTexture(textures, material.specularTexture, tu, tv, specularMap);
+
+				specColor[0] = specularMap[0];
+				specColor[1] = specularMap[1];
+				specColor[2] = specularMap[2];
+
+				float specLum = specularMap[0] * 0.2126f + specularMap[1] * 0.7152f + specularMap[2] * 0.0722f;
+				roughness *= (1.0f - specLum * 0.6f);
+				metallic = fmaxf(metallic, specLum * 0.3f);
+				metallic = fminf(1.0f, fmaxf(0.0f, metallic));
+				roughness = fminf(1.0f, fmaxf(0.01f, roughness));
+			}
+
+			// ---------------------------------------------------------------
+			// Vertex color
+			// ---------------------------------------------------------------
+			if (material.useVertexColor) {
+				const cudaTriangle_t& tri = triangles[hitInfo.triangleIndex];
+				const cudaVertex_t& vert0 = vertices[tri.vertexIndices[0]];
+				const cudaVertex_t& vert1 = vertices[tri.vertexIndices[1]];
+				const cudaVertex_t& vert2 = vertices[tri.vertexIndices[2]];
+
+				float bw = hitInfo.barycentrics[0];
+				float bu = hitInfo.barycentrics[1];
+				float bv = hitInfo.barycentrics[2];
+
+				float vertexColor[4];
+				vertexColor[0] = bw * vert0.color[0] + bu * vert1.color[0] + bv * vert2.color[0];
+				vertexColor[1] = bw * vert0.color[1] + bu * vert1.color[1] + bv * vert2.color[1];
+				vertexColor[2] = bw * vert0.color[2] + bu * vert1.color[2] + bv * vert2.color[2];
+				vertexColor[3] = bw * vert0.color[3] + bu * vert1.color[3] + bv * vert2.color[3];
+
+				albedo[0] *= vertexColor[0];
+				albedo[1] *= vertexColor[1];
+				albedo[2] *= vertexColor[2];
+				albedo[3] *= vertexColor[3];
+			}
+
+			// ---------------------------------------------------------------
+			// Alpha test: skip transparent fragments
+			// ---------------------------------------------------------------
+			if (material.alphaTest > 0.0f && albedo[3] < material.alphaTest) {
+				ray.origin[0] = hitInfo.position[0] + ray.direction[0] * rayOffset;
+				ray.origin[1] = hitInfo.position[1] + ray.direction[1] * rayOffset;
+				ray.origin[2] = hitInfo.position[2] + ray.direction[2] * rayOffset;
+				ray.tMin = rayOffset;
+				continue;  // transparent skip — does NOT increment depth
+			}
+
+			// nearly invisible alpha blend - skip
+			if (material.blendMode == 1 && albedo[3] < 0.05f) {
+				ray.origin[0] = hitInfo.position[0] + ray.direction[0] * rayOffset;
+				ray.origin[1] = hitInfo.position[1] + ray.direction[1] * rayOffset;
+				ray.origin[2] = hitInfo.position[2] + ray.direction[2] * rayOffset;
+				ray.tMin = rayOffset;
+				continue;  // transparent skip — does NOT increment depth
+			}
+
+			// ---------------------------------------------------------------
+			// Lit noshadows decal overlays
+			// ---------------------------------------------------------------
+			if (material.noShadows && !material.isAmbientOnly && material.alphaTest == 0.0f
+				&& material.transmission == 0.0f && material.blendMode == 0) {
+				float alpha = albedo[3];
+				float lum = albedo[0] * 0.2126f + albedo[1] * 0.7152f + albedo[2] * 0.0722f;
+				if (lum < 0.02f) alpha = 0.0f;
+
+				if (alpha < 0.05f) {
+					ray.origin[0] = hitInfo.position[0] + ray.direction[0] * rayOffset;
+					ray.origin[1] = hitInfo.position[1] + ray.direction[1] * rayOffset;
+					ray.origin[2] = hitInfo.position[2] + ray.direction[2] * rayOffset;
+					ray.tMin = rayOffset;
+					continue;
+				}
+
+				// light the decal overlay
+				if (numLights > 0) {
+					int numSamples = min(numLights, maxLightSamples);
+					float lightWeight = (float)numLights / (float)numSamples;
+					for (int i = 0; i < numSamples; i++) {
+						int lightIndex = (int)(curand_uniform(&randState) * numLights);
+						if (lightIndex >= numLights) lightIndex = numLights - 1;
+						float directLight[3];
+						SampleDirectLight(lights[lightIndex], hitInfo.position, surfaceNormal,
+							vertices, triangles, bvhNodes, triIndices, materials, textures, &randState, directLight);
+						pathRadiance[0] += pathThroughput[0] * directLight[0] * albedo[0] * alpha * lightWeight;
+						pathRadiance[1] += pathThroughput[1] * directLight[1] * albedo[1] * alpha * lightWeight;
+						pathRadiance[2] += pathThroughput[2] * directLight[2] * albedo[2] * alpha * lightWeight;
 					}
 				}
 
-				atten = light.intensity * distAtten * coneAtten;
+				pathRadiance[0] += pathThroughput[0] * material.emission[0] * emissionBoost * alpha;
+				pathRadiance[1] += pathThroughput[1] * material.emission[1] * emissionBoost * alpha;
+				pathRadiance[2] += pathThroughput[2] * material.emission[2] * emissionBoost * alpha;
 
-				// apply projected texture to light color contribution below
-				float lightColR = light.color[0] * projR;
-				float lightColG = light.color[1] * projG;
-				float lightColB = light.color[2] * projB;
+				pathThroughput[0] *= (1.0f - alpha);
+				pathThroughput[1] *= (1.0f - alpha);
+				pathThroughput[2] *= (1.0f - alpha);
 
-				// check NdotL
-				float NdotL = nx * lDirX + ny * lDirY + nz * lDirZ;
-				if (NdotL > 0.0f && atten > 0.0f) {
-					float sOx = pX + nx * 0.02f;
-					float sOy = pY + ny * 0.02f;
-					float sOz = pZ + nz * 0.02f;
+				ray.origin[0] = hitInfo.position[0] + ray.direction[0] * rayOffset;
+				ray.origin[1] = hitInfo.position[1] + ray.direction[1] * rayOffset;
+				ray.origin[2] = hitInfo.position[2] + ray.direction[2] * rayOffset;
+				ray.tMin = rayOffset;
+				continue;  // decal overlay — does NOT increment depth
+			}
 
-					bool inShadow = (numBVHNodes > 0) &&
-						TraceShadowRay(sOx, sOy, sOz, lDirX, lDirY, lDirZ, shadowDist,
-									   vertices, triangles, triIndices, bvhNodes, numBVHNodes);
+			// ---------------------------------------------------------------
+			// Ambient-only materials (self-illuminated, HUD, etc)
+			// ---------------------------------------------------------------
+			if (material.isAmbientOnly) {
+				float alpha = albedo[3];
 
-					if (!inShadow) {
-						float scale = NdotL * atten * ((float)numLights / (float)lightsToSample) / 3.14159265f;
-						colorR += throughR * albR * lightColR * scale;
-						colorG += throughG * albG * lightColG * scale;
-						colorB += throughB * albB * lightColB * scale;
+				if (material.blendMode == 2) {
+					// additive
+					pathRadiance[0] += pathThroughput[0] * albedo[0] * alpha;
+					pathRadiance[1] += pathThroughput[1] * albedo[1] * alpha;
+					pathRadiance[2] += pathThroughput[2] * albedo[2] * alpha;
+				} else if (material.blendMode == 3) {
+					// modulate
+					pathThroughput[0] *= albedo[0];
+					pathThroughput[1] *= albedo[1];
+					pathThroughput[2] *= albedo[2];
+				} else {
+					// default alpha-over
+					pathRadiance[0] += pathThroughput[0] * albedo[0] * alpha;
+					pathRadiance[1] += pathThroughput[1] * albedo[1] * alpha;
+					pathRadiance[2] += pathThroughput[2] * albedo[2] * alpha;
+					pathThroughput[0] *= (1.0f - alpha);
+					pathThroughput[1] *= (1.0f - alpha);
+					pathThroughput[2] *= (1.0f - alpha);
+				}
+
+				ray.origin[0] = hitInfo.position[0] + ray.direction[0] * rayOffset;
+				ray.origin[1] = hitInfo.position[1] + ray.direction[1] * rayOffset;
+				ray.origin[2] = hitInfo.position[2] + ray.direction[2] * rayOffset;
+				ray.tMin = rayOffset;
+				continue;  // ambient-only overlay — does NOT increment depth
+			}
+
+			// ---------------------------------------------------------------
+			// Additive blending
+			// ---------------------------------------------------------------
+			if (material.blendMode == 2) {
+				pathRadiance[0] += pathThroughput[0] * albedo[0] * albedo[3];
+				pathRadiance[1] += pathThroughput[1] * albedo[1] * albedo[3];
+				pathRadiance[2] += pathThroughput[2] * albedo[2] * albedo[3];
+				ray.origin[0] = hitInfo.position[0] + ray.direction[0] * rayOffset;
+				ray.origin[1] = hitInfo.position[1] + ray.direction[1] * rayOffset;
+				ray.origin[2] = hitInfo.position[2] + ray.direction[2] * rayOffset;
+				ray.tMin = rayOffset;
+				continue;  // additive overlay — does NOT increment depth
+			} else if (material.blendMode == 3) {
+				// modulate
+				pathThroughput[0] *= albedo[0];
+				pathThroughput[1] *= albedo[1];
+				pathThroughput[2] *= albedo[2];
+				ray.origin[0] = hitInfo.position[0] + ray.direction[0] * rayOffset;
+				ray.origin[1] = hitInfo.position[1] + ray.direction[1] * rayOffset;
+				ray.origin[2] = hitInfo.position[2] + ray.direction[2] * rayOffset;
+				ray.tMin = rayOffset;
+				continue;  // modulate overlay — does NOT increment depth
+			}
+
+			// ---------------------------------------------------------------
+			// Transmission / glass: Fresnel reflection vs refraction
+			// ---------------------------------------------------------------
+			if (material.transmission > 0.0f) {
+				float negDir[3] = { -ray.direction[0], -ray.direction[1], -ray.direction[2] };
+				float cosTheta = fabsf(dot3(surfaceNormal, negDir));
+				float r0 = (material.ior - 1.0f) / (material.ior + 1.0f);
+				r0 = r0 * r0;
+				float fresnel = r0 + (1.0f - r0) * powf(1.0f - cosTheta, 5.0f);
+				float reflectProb = fresnel + (1.0f - fresnel) * (1.0f - material.transmission);
+
+				if (curand_uniform(&randState) > reflectProb) {
+					// transmit through
+					pathThroughput[0] *= albedo[0];
+					pathThroughput[1] *= albedo[1];
+					pathThroughput[2] *= albedo[2];
+					ray.origin[0] = hitInfo.position[0] - surfaceNormal[0] * rayOffset;
+					ray.origin[1] = hitInfo.position[1] - surfaceNormal[1] * rayOffset;
+					ray.origin[2] = hitInfo.position[2] - surfaceNormal[2] * rayOffset;
+					ray.tMin = rayOffset;
+					continue;  // glass transmission — does NOT increment depth
+				}
+			}
+
+			// ---------------------------------------------------------------
+			// Emission
+			// ---------------------------------------------------------------
+			pathRadiance[0] += pathThroughput[0] * material.emission[0] * emissionBoost;
+			pathRadiance[1] += pathThroughput[1] * material.emission[1] * emissionBoost;
+			pathRadiance[2] += pathThroughput[2] * material.emission[2] * emissionBoost;
+
+			// ---------------------------------------------------------------
+			// Direct light sampling with PBR BRDF
+			// ---------------------------------------------------------------
+			if (numLights > 0) {
+				int numSamples = min(numLights, maxLightSamples);
+				float lightWeight = (float)numLights / (float)numSamples;
+
+				for (int i = 0; i < numSamples; i++) {
+					int lightIndex = (int)(curand_uniform(&randState) * numLights);
+					if (lightIndex >= numLights) lightIndex = numLights - 1;
+
+					float directLight[3];
+					SampleDirectLight(lights[lightIndex], hitInfo.position, surfaceNormal,
+						vertices, triangles, bvhNodes, triIndices, materials, textures, &randState, directLight);
+
+					if (material.blendMode == 0 || material.blendMode == 1) {
+						// compute light direction for PBR BRDF evaluation
+						float wi[3];
+						if (lights[lightIndex].type == 1) {
+							wi[0] = -lights[lightIndex].direction[0];
+							wi[1] = -lights[lightIndex].direction[1];
+							wi[2] = -lights[lightIndex].direction[2];
+						} else {
+							wi[0] = lights[lightIndex].position[0] - hitInfo.position[0];
+							wi[1] = lights[lightIndex].position[1] - hitInfo.position[1];
+							wi[2] = lights[lightIndex].position[2] - hitInfo.position[2];
+						}
+						normalize3(wi);
+
+						float wo[3] = { -ray.direction[0], -ray.direction[1], -ray.direction[2] };
+						float directBrdf[3];
+						EvaluatePBRMaterial(albedo, surfaceNormal, wo, wi, metallic, roughness, specularBoost, specColor, directBrdf);
+
+						float alphaScale = (material.blendMode == 1) ? albedo[3] : 1.0f;
+						pathRadiance[0] += pathThroughput[0] * directLight[0] * directBrdf[0] * alphaScale * lightWeight;
+						pathRadiance[1] += pathThroughput[1] * directLight[1] * directBrdf[1] * alphaScale * lightWeight;
+						pathRadiance[2] += pathThroughput[2] * directLight[2] * directBrdf[2] * alphaScale * lightWeight;
+					} else {
+						// fallback Lambertian
+						pathRadiance[0] += pathThroughput[0] * directLight[0] * albedo[0] * lightWeight;
+						pathRadiance[1] += pathThroughput[1] * directLight[1] * albedo[1] * lightWeight;
+						pathRadiance[2] += pathThroughput[2] * directLight[2] * albedo[2] * lightWeight;
+					}
+
+					// -------------------------------------------------------
+					// Volumetric scattering
+					// -------------------------------------------------------
+					if (depth < 2 && lights[lightIndex].volumetric > 0.0f) {
+						float volumetric[3];
+						float rayLen = hitInfo.t;
+						float rayDir[3] = { ray.direction[0], ray.direction[1], ray.direction[2] };
+						float rayOrg[3] = { ray.origin[0], ray.origin[1], ray.origin[2] };
+
+						SampleVolumetricScattering(lights[lightIndex], rayOrg, rayDir, rayLen,
+							vertices, triangles, bvhNodes, triIndices, materials, textures, &randState, volumetric,
+							volumetricDensity, volumetricSteps, volumetricAnisotropy, volFalloff, volMaxDist);
+
+						pathRadiance[0] += pathThroughput[0] * volumetric[0] * lightWeight;
+						pathRadiance[1] += pathThroughput[1] * volumetric[1] * lightWeight;
+						pathRadiance[2] += pathThroughput[2] * volumetric[2] * lightWeight;
 					}
 				}
 			}
 
-			// common path for point (type 0) and directional (type 1) lights
-			if (light.type == 0 || light.type == 1) {
-				float NdotL = nx * lDirX + ny * lDirY + nz * lDirZ;
+			// No ambient fill — Doom 3 scenes are lit exclusively by placed lights.
 
-				if (NdotL > 0.0f && atten > 0.0f) {
-					float sOx = pX + nx * 0.02f;
-					float sOy = pY + ny * 0.02f;
-					float sOz = pZ + nz * 0.02f;
+			// ---------------------------------------------------------------
+			// Indirect lighting (one-bounce GI)
+			// ---------------------------------------------------------------
+			if (depth == 0 && indirectProb > 0.0f && curand_uniform(&randState) < indirectProb) {
+				float indirectDir[3];
+				float indirectPdf;
+				SampleHemisphere(surfaceNormal, &randState, indirectDir, indirectPdf);
 
-					bool inShadow = (numBVHNodes > 0) &&
-						TraceShadowRay(sOx, sOy, sOz, lDirX, lDirY, lDirZ, shadowDist,
-									   vertices, triangles, triIndices, bvhNodes, numBVHNodes);
+				if (indirectPdf > 1e-6f) {
+					float indirectLight[3];
+					SampleIndirectLight(hitInfo.position, surfaceNormal, indirectDir,
+						vertices, triangles, bvhNodes, triIndices, materials, textures,
+						lights, numLights, &randState, indirectLight);
 
-					if (!inShadow) {
-						// Lambertian BRDF = albedo / pi
-						// weight by numLights/lightsToSample to compensate for random selection
-						float scale = NdotL * atten * ((float)numLights / (float)lightsToSample) / 3.14159265f;
+					if (!isfinite(indirectLight[0])) indirectLight[0] = 0.0f;
+					if (!isfinite(indirectLight[1])) indirectLight[1] = 0.0f;
+					if (!isfinite(indirectLight[2])) indirectLight[2] = 0.0f;
 
-						colorR += throughR * albR * light.color[0] * scale;
-						colorG += throughG * albG * light.color[1] * scale;
-						colorB += throughB * albB * light.color[2] * scale;
+					if (material.blendMode == 0 || material.blendMode == 1) {
+						float indirectBrdf[3];
+						float wo[3] = { -ray.direction[0], -ray.direction[1], -ray.direction[2] };
+						float NdotL_indirect = fmaxf(0.0f, dot3(surfaceNormal, indirectDir));
+
+						EvaluatePBRMaterial(albedo, surfaceNormal, wo, indirectDir, metallic, roughness, specularBoost, specColor, indirectBrdf);
+
+						float indirectScale = NdotL_indirect / (indirectProb * indirectPdf);
+						if (indirectScale > 10.0f) indirectScale = 10.0f;
+						float alphaScale = (material.blendMode == 1) ? albedo[3] : 1.0f;
+						pathRadiance[0] += pathThroughput[0] * indirectLight[0] * indirectBrdf[0] * indirectScale * alphaScale;
+						pathRadiance[1] += pathThroughput[1] * indirectLight[1] * indirectBrdf[1] * indirectScale * alphaScale;
+						pathRadiance[2] += pathThroughput[2] * indirectLight[2] * indirectBrdf[2] * indirectScale * alphaScale;
+					} else {
+						float indirectBrdf[3];
+						float wo[3] = { -ray.direction[0], -ray.direction[1], -ray.direction[2] };
+						EvaluateMaterial(albedo, surfaceNormal, wo, indirectDir, indirectBrdf);
+
+						float indirectScale = (1.0f / indirectProb) / indirectPdf;
+						if (indirectScale > 10.0f) indirectScale = 10.0f;
+						pathRadiance[0] += pathThroughput[0] * indirectLight[0] * indirectBrdf[0] * indirectScale;
+						pathRadiance[1] += pathThroughput[1] * indirectLight[1] * indirectBrdf[1] * indirectScale;
+						pathRadiance[2] += pathThroughput[2] * indirectLight[2] * indirectBrdf[2] * indirectScale;
 					}
 				}
 			}
-		}
 
-		// cosine-weighted hemisphere sampling for indirect bounce
-		float r1 = cupt_random(rng); rng = cupt_hash(rng);
-		float r2 = cupt_random(rng); rng = cupt_hash(rng);
+			// ---------------------------------------------------------------
+			// Throughput early termination
+			// ---------------------------------------------------------------
+			if (throughputClamp > 0.0f && pathThroughput[0] < throughputClamp && pathThroughput[1] < throughputClamp && pathThroughput[2] < throughputClamp) {
+				break;
+			}
 
-		float sinTheta = sqrtf(r1);
-		float cosTheta = sqrtf(1.0f - r1);
-		float phi = 2.0f * 3.14159265f * r2;
+			// alpha blend pass-through for semi-transparent surfaces
+			if (material.blendMode == 1 && albedo[3] < 0.95f) {
+				float alpha = albedo[3];
+				pathThroughput[0] *= (1.0f - alpha);
+				pathThroughput[1] *= (1.0f - alpha);
+				pathThroughput[2] *= (1.0f - alpha);
+				ray.origin[0] = hitInfo.position[0] + ray.direction[0] * rayOffset;
+				ray.origin[1] = hitInfo.position[1] + ray.direction[1] * rayOffset;
+				ray.origin[2] = hitInfo.position[2] + ray.direction[2] * rayOffset;
+				ray.tMin = rayOffset;
+				continue;  // alpha blend pass-through — does NOT increment depth
+			}
 
-		// build orthonormal basis (tangent, bitangent) from normal
-		float upX, upY, upZ;
-		if (fabsf(nx) < 0.9f) { upX = 1.0f; upY = 0.0f; upZ = 0.0f; }
-		else { upX = 0.0f; upY = 1.0f; upZ = 0.0f; }
+			// only real opaque/PBR bounces consume depth budget
+			depth++;
 
-		// tangent = normalize(cross(up, n))
-		float tX = upY * nz - upZ * ny;
-		float tY = upZ * nx - upX * nz;
-		float tZ = upX * ny - upY * nx;
-		float tIL = rsqrtf(tX * tX + tY * tY + tZ * tZ + 1e-12f);
-		tX *= tIL; tY *= tIL; tZ *= tIL;
+			// ---------------------------------------------------------------
+			// Russian roulette
+			// ---------------------------------------------------------------
+			if (rrEnabled && depth >= rrMinBounces) {
+				float maxThroughput = fmaxf(pathThroughput[0], fmaxf(pathThroughput[1], pathThroughput[2]));
+				float survivalProb = fminf(0.95f, fmaxf(rrSurvivalMin, maxThroughput));
+				if (curand_uniform(&randState) > survivalProb) {
+					break;
+				}
+				float invProb = 1.0f / survivalProb;
+				pathThroughput[0] *= invProb;
+				pathThroughput[1] *= invProb;
+				pathThroughput[2] *= invProb;
+			}
 
-		// bitangent = cross(n, tangent)
-		float bX = ny * tZ - nz * tY;
-		float bY = nz * tX - nx * tZ;
-		float bZ = nx * tY - ny * tX;
+			// early termination
+			if (earlyTermThreshold > 0.0f) {
+				float maxThroughput = fmaxf(pathThroughput[0], fmaxf(pathThroughput[1], pathThroughput[2]));
+				if (maxThroughput < earlyTermThreshold) break;
+			}
 
-		// sample direction in local frame -> world
-		float cosP = cosf(phi);
-		float sinP = sinf(phi);
+			// ---------------------------------------------------------------
+			// Sample next bounce direction (cosine-weighted hemisphere)
+			// ---------------------------------------------------------------
+			float nextDir[3];
+			float pdf;
+			SampleHemisphere(surfaceNormal, &randState, nextDir, pdf);
 
-		rayDirX = sinTheta * cosP * tX + sinTheta * sinP * bX + cosTheta * nx;
-		rayDirY = sinTheta * cosP * tY + sinTheta * sinP * bY + cosTheta * ny;
-		rayDirZ = sinTheta * cosP * tZ + sinTheta * sinP * bZ + cosTheta * nz;
+			if (pdf < 1e-6f) break;
 
-		// offset origin along normal to avoid self-intersection
-		rayOrigX = pX + nx * 0.01f;
-		rayOrigY = pY + ny * 0.01f;
-		rayOrigZ = pZ + nz * 0.01f;
+			// update throughput with PBR BRDF
+			float brdf[3];
+			float wo[3] = { -ray.direction[0], -ray.direction[1], -ray.direction[2] };
+			float NdotL_bounce = fmaxf(0.0f, dot3(surfaceNormal, nextDir));
 
-		// for cosine-weighted sampling  PDF = cosTheta / pi
-		// Lambertian BRDF = albedo / pi
-		// weight = (BRDF * cosTheta) / PDF = albedo
-		throughR *= albR;
-		throughG *= albG;
-		throughB *= albB;
+			if (material.blendMode == 0 || material.blendMode == 1) {
+				EvaluatePBRMaterial(albedo, surfaceNormal, wo, nextDir, metallic, roughness, specularBoost, specColor, brdf);
+			} else {
+				EvaluateMaterial(albedo, surfaceNormal, wo, nextDir, brdf);
+			}
 
-		// russian roulette after bounce 2
-		if (bounce >= 2) {
-			float p = fmaxf(throughR, fmaxf(throughG, throughB));
-			if (p < 0.01f) break;
-			float rrRoll = cupt_random(rng); rng = cupt_hash(rng);
-			if (rrRoll > p) break;
-			float invP = 1.0f / p;
-			throughR *= invP;
-			throughG *= invP;
-			throughB *= invP;
-		}
+			pathThroughput[0] *= brdf[0] * NdotL_bounce / pdf;
+			pathThroughput[1] *= brdf[1] * NdotL_bounce / pdf;
+			pathThroughput[2] *= brdf[2] * NdotL_bounce / pdf;
+
+			// NaN/Inf guard on throughput
+			if (!isfinite(pathThroughput[0]) || !isfinite(pathThroughput[1]) || !isfinite(pathThroughput[2])) {
+				break;
+			}
+
+			// next ray from surface
+			ray.origin[0] = hitInfo.position[0] + surfaceNormal[0] * rayOffset;
+			ray.origin[1] = hitInfo.position[1] + surfaceNormal[1] * rayOffset;
+			ray.origin[2] = hitInfo.position[2] + surfaceNormal[2] * rayOffset;
+			ray.direction[0] = nextDir[0];
+			ray.direction[1] = nextDir[1];
+			ray.direction[2] = nextDir[2];
+			ray.tMin = rayOffset;
+			ray.tMax = 1e10f;
+
+		}  // end bounce loop
+
+		color[0] += pathRadiance[0];
+		color[1] += pathRadiance[1];
+		color[2] += pathRadiance[2];
+
+	}  // end sample loop
+
+	// average over samples
+	color[0] /= (float)samplesPerPixel;
+	color[1] /= (float)samplesPerPixel;
+	color[2] /= (float)samplesPerPixel;
+
+	// firefly clamp
+	if (fireflyClamp > 0.0f) {
+		color[0] = fminf(color[0], fireflyClamp);
+		color[1] = fminf(color[1], fireflyClamp);
+		color[2] = fminf(color[2], fireflyClamp);
 	}
 
-	// progressive accumulation
-	if (frameNumber > 0) {
-		float oldR = framebuffer[pixelIndex + 0];
-		float oldG = framebuffer[pixelIndex + 1];
-		float oldB = framebuffer[pixelIndex + 2];
-
-		float t = 1.0f / (float)(frameNumber + 1);
-		colorR = oldR + (colorR - oldR) * t;
-		colorG = oldG + (colorG - oldG) * t;
-		colorB = oldB + (colorB - oldB) * t;
+	// NaN/Inf guard
+	if (!isfinite(color[0]) || !isfinite(color[1]) || !isfinite(color[2])) {
+		color[0] = color[1] = color[2] = 0.0f;
 	}
 
-	// store accumulated HDR
-	framebuffer[pixelIndex + 0] = colorR;
-	framebuffer[pixelIndex + 1] = colorG;
-	framebuffer[pixelIndex + 2] = colorB;
+	// additive temporal accumulation
+	framebuffer[pixelIndex + 0] += color[0];
+	framebuffer[pixelIndex + 1] += color[1];
+	framebuffer[pixelIndex + 2] += color[2];
 	framebuffer[pixelIndex + 3] = 1.0f;
+}
 
-	// tonemap with exposure boost and Reinhard curve
-	const float exposure = 2.0f;
-	float r = colorR * exposure;
-	float g = colorG * exposure;
-	float b = colorB * exposure;
+/*
+=================================================================================
+ToneMappingKernel - Converts HDR accumulated buffer to LDR output
+=================================================================================
+*/
+__global__ void ToneMappingKernel(
+	const float* hdrBuffer,
+	unsigned char* ldrBuffer,
+	int width,
+	int height,
+	float exposure,
+	float gamma,
+	int toneMapMode,
+	int frameCount
+) {
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-	// Reinhard tonemap: x / (1 + x) — maps [0,inf) -> [0,1)
-	r = r / (1.0f + r);
-	g = g / (1.0f + g);
-	b = b / (1.0f + b);
+	if (x >= width || y >= height) return;
 
-	// approximate gamma correction (linear -> sRGB)
-	r = powf(fmaxf(r, 0.0f), 1.0f / 2.2f);
-	g = powf(fmaxf(g, 0.0f), 1.0f / 2.2f);
-	b = powf(fmaxf(b, 0.0f), 1.0f / 2.2f);
+	int pixelIndex = (y * width + x) * 4;
 
-	outputBuffer[pixelIndex + 0] = (unsigned char)(fminf(r, 1.0f) * 255.0f);
-	outputBuffer[pixelIndex + 1] = (unsigned char)(fminf(g, 1.0f) * 255.0f);
-	outputBuffer[pixelIndex + 2] = (unsigned char)(fminf(b, 1.0f) * 255.0f);
-	outputBuffer[pixelIndex + 3] = 255;
+	float invFrameCount = 1.0f / fmaxf(1.0f, (float)frameCount);
+	float r = hdrBuffer[pixelIndex + 0] * invFrameCount;
+	float g = hdrBuffer[pixelIndex + 1] * invFrameCount;
+	float b = hdrBuffer[pixelIndex + 2] * invFrameCount;
+
+	// apply exposure
+	r *= exposure;
+	g *= exposure;
+	b *= exposure;
+
+	// tone mapping
+	if (toneMapMode == 1) {
+		// ACES approximation
+		float a = 2.51f;
+		float bp = 0.03f;
+		float c = 2.43f;
+		float d = 0.59f;
+		float e = 0.14f;
+		r = (r * (a * r + bp)) / (r * (c * r + d) + e);
+		g = (g * (a * g + bp)) / (g * (c * g + d) + e);
+		b = (b * (a * b + bp)) / (b * (c * b + d) + e);
+	} else if (toneMapMode == 2) {
+		// uncharted 2
+		float A = 0.15f, B = 0.50f, C = 0.10f, D = 0.20f, E = 0.02f, F = 0.30f;
+		float W = 11.2f;
+		float mapW = ((W * (A * W + C * B) + D * E) / (W * (A * W + B) + D * F)) - E / F;
+		float whiteScale = 1.0f / mapW;
+		r = (((r * (A * r + C * B) + D * E) / (r * (A * r + B) + D * F)) - E / F) * whiteScale;
+		g = (((g * (A * g + C * B) + D * E) / (g * (A * g + B) + D * F)) - E / F) * whiteScale;
+		b = (((b * (A * b + C * B) + D * E) / (b * (A * b + B) + D * F)) - E / F) * whiteScale;
+	} else {
+		// reinhard (default, mode 0)
+		r = r / (1.0f + r);
+		g = g / (1.0f + g);
+		b = b / (1.0f + b);
+	}
+
+	// gamma correction
+	float invGamma = 1.0f / gamma;
+	r = powf(fmaxf(r, 0.0f), invGamma);
+	g = powf(fmaxf(g, 0.0f), invGamma);
+	b = powf(fmaxf(b, 0.0f), invGamma);
+
+	// convert to 8-bit LDR
+	ldrBuffer[pixelIndex + 0] = (unsigned char)(clamp(r, 0.0f, 1.0f) * 255.0f);
+	ldrBuffer[pixelIndex + 1] = (unsigned char)(clamp(g, 0.0f, 1.0f) * 255.0f);
+	ldrBuffer[pixelIndex + 2] = (unsigned char)(clamp(b, 0.0f, 1.0f) * 255.0f);
+	ldrBuffer[pixelIndex + 3] = 255;
 }

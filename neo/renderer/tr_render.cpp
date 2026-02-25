@@ -33,6 +33,22 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/tr_local.h"
 
 /*
+=================
+RB Statistics
+=================
+*/
+
+/*
+ */
+static int  stats_frameCount = 0;
+static int  stats_startTime  = -1;
+static bool stats_wasActive  = false;
+static int  stats_lastTime   = 0;
+static float stats_fps       = 0.0f;
+static int  stats_fpsFrames  = 0;
+
+
+/*
 
   back end scene + lights rendering functions
 
@@ -934,6 +950,50 @@ void RB_DrawView( const void *data ) {
 	{
 		// Use standard OpenGL renderer
 		RB_STD_DrawView();
+	}
+
+#ifdef HAVE_CUDA
+	// drive statemachines for CUDA renderer
+	RB_CUDA_CompareCheck();
+	RB_CUDA_SequenceCheck();
+#endif
+
+	RB_GLSequenceCheck();
+
+	// per-frame statistics
+	{
+		if (r_frameStats.GetBool()) {
+			// Reset counters on first activation or re-activation
+			if (!stats_wasActive) {
+				stats_frameCount = 0;
+				stats_startTime  = Sys_Milliseconds();
+				stats_lastTime   = stats_startTime;
+				stats_fps        = 0.0f;
+				stats_fpsFrames  = 0;
+				stats_wasActive  = true;
+				common->Printf("[r_frameStats] Tracking started.\n");
+			}
+
+			stats_frameCount++;
+			stats_fpsFrames++;
+
+			int now = Sys_Milliseconds();
+			int fpsElapsed = now - stats_lastTime;
+
+			// Update FPS every 500ms
+			if (fpsElapsed >= 500) {
+				stats_fps = (float)stats_fpsFrames / ((float)fpsElapsed * 0.001f);
+				stats_fpsFrames = 0;
+				stats_lastTime = now;
+			}
+
+			float elapsedSec = (float)(now - stats_startTime) * 0.001f;
+			common->Printf("frame: %d | time: %.2fs | fps: %.1f\n",
+							stats_frameCount, elapsedSec, stats_fps);
+		} else {
+			// reset flag so counters are re-initialized on next activation
+			stats_wasActive = false;
+		}
 	}
 
 	// restore the context for 2D drawing if we were stubbing it out

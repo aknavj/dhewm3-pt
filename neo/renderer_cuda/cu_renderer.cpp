@@ -6,8 +6,63 @@
 
 // console variables
 idCVar r_cuDraw("r_cuDraw", "1", CVAR_RENDERER | CVAR_ARCHIVE, "Use CUDA renderer");
+idCVar r_cuMode("r_cuMode", "0", CVAR_RENDERER | CVAR_ARCHIVE, "CUDA render mode: 0=path tracing, 1=BVH debug, 2=textured combined, 3=base color, 4=albedo texture, 5=normal texture, 6=specular texture");
 idCVar r_cuDebug("r_cuDebug", "0", CVAR_RENDERER, "Show CUDA renderer debug info");
-idCVar r_cuRenderMode("r_cuRenderMode", "0", CVAR_RENDERER, "CUDA renderer mode");
+
+// Resolution & Sampling
+idCVar r_cuRenderScale("r_cuRenderScale", "0.5", CVAR_RENDERER | CVAR_ARCHIVE, "Render scale (0.25-1.0, lower = faster)");
+idCVar r_cuSamplesPerPixel("r_cuSamplesPerPixel", "4", CVAR_RENDERER | CVAR_ARCHIVE, "Samples per pixel per frame (1-64)");
+
+// Ray Tracing Depth
+idCVar r_cuMaxDepth("r_cuMaxDepth", "3", CVAR_RENDERER | CVAR_ARCHIVE, "Maximum ray bounces (1-16)");
+idCVar r_cuMaxLightSamples("r_cuMaxLightSamples", "2", CVAR_RENDERER | CVAR_ARCHIVE, "Direct light samples per hit (1-8)");
+idCVar r_cuIndirectProb("r_cuIndirectProb", "0.15", CVAR_RENDERER | CVAR_ARCHIVE, "Indirect lighting probability (0.0-1.0)");
+
+// Russian Roulette Path Termination
+idCVar r_cuRussianRoulette("r_cuRussianRoulette", "1", CVAR_RENDERER | CVAR_ARCHIVE, "Enable Russian roulette path termination");
+idCVar r_cuRRMinBounces("r_cuRRMinBounces", "2", CVAR_RENDERER | CVAR_ARCHIVE, "Min bounces before Russian roulette (1-8)");
+idCVar r_cuRRSurvivalMin("r_cuRRSurvivalMin", "0.1", CVAR_RENDERER | CVAR_ARCHIVE, "Minimum survival probability (0.05-0.5)");
+idCVar r_cuEarlyTermThreshold("r_cuEarlyTermThreshold", "0.05", CVAR_RENDERER | CVAR_ARCHIVE, "Throughput threshold for early termination (0.0-0.5)");
+
+// Firefly & Clamping
+idCVar r_cuFireflyClamp("r_cuFireflyClamp", "5.0", CVAR_RENDERER | CVAR_ARCHIVE, "Clamp max sample brightness (0=off)");
+idCVar r_cuThroughputClamp("r_cuThroughputClamp", "0.25", CVAR_RENDERER | CVAR_ARCHIVE, "Early path termination on low throughput (0.0-1.0)");
+
+// Temporal Accumulation
+idCVar r_cuAccumulation("r_cuAccumulation", "1", CVAR_RENDERER | CVAR_ARCHIVE, "Temporal accumulation (0=off, 1=on)");
+
+// Ray Offsets & Bias
+idCVar r_cuRayOffset("r_cuRayOffset", "0.001", CVAR_RENDERER | CVAR_ARCHIVE, "Ray origin offset to prevent self-intersection");
+
+// Material & Lighting
+idCVar r_cuEmissionBoost("r_cuEmissionBoost", "1.0", CVAR_RENDERER | CVAR_ARCHIVE, "Emission multiplier (0.1-10.0)");
+idCVar r_cuSpecularBoost("r_cuSpecularBoost", "2.0", CVAR_RENDERER | CVAR_ARCHIVE, "Specular BRDF multiplier (Doom3 uses 2x)");
+idCVar r_cuSoftShadowScale("r_cuSoftShadowScale", "0.2", CVAR_RENDERER | CVAR_ARCHIVE, "Soft shadow jitter scale (0=hard, 0.05=subtle, 0.2=soft)");
+
+// Tone Mapping & Display
+idCVar r_cuExposure("r_cuExposure", "1.0", CVAR_RENDERER | CVAR_ARCHIVE, "Exposure multiplier (0.1-10.0)");
+idCVar r_cuGamma("r_cuGamma", "2.2", CVAR_RENDERER | CVAR_ARCHIVE, "Gamma correction (1.8-2.6)");
+idCVar r_cuToneMapMode("r_cuToneMapMode", "1", CVAR_RENDERER | CVAR_ARCHIVE, "Tone map: 0=Reinhard, 1=ACES, 2=Uncharted2");
+
+// Sky & Ambient Lighting
+idCVar r_cuSkyIntensity("r_cuSkyIntensity", "0.0", CVAR_RENDERER | CVAR_ARCHIVE, "Sky dome ambient intensity (0.0-2.0)");
+idCVar r_cuSkyColorZenithR("r_cuSkyColorZenithR", "0.3", CVAR_RENDERER, "Sky zenith R");
+idCVar r_cuSkyColorZenithG("r_cuSkyColorZenithG", "0.35", CVAR_RENDERER, "Sky zenith G");
+idCVar r_cuSkyColorZenithB("r_cuSkyColorZenithB", "0.5", CVAR_RENDERER, "Sky zenith B");
+idCVar r_cuSkyColorHorizonR("r_cuSkyColorHorizonR", "0.4", CVAR_RENDERER, "Sky horizon R");
+idCVar r_cuSkyColorHorizonG("r_cuSkyColorHorizonG", "0.35", CVAR_RENDERER, "Sky horizon G");
+idCVar r_cuSkyColorHorizonB("r_cuSkyColorHorizonB", "0.3", CVAR_RENDERER, "Sky horizon B");
+idCVar r_cuSkyColorGroundR("r_cuSkyColorGroundR", "0.1", CVAR_RENDERER, "Sky ground R");
+idCVar r_cuSkyColorGroundG("r_cuSkyColorGroundG", "0.08", CVAR_RENDERER, "Sky ground G");
+idCVar r_cuSkyColorGroundB("r_cuSkyColorGroundB", "0.05", CVAR_RENDERER, "Sky ground B");
+
+// Volumetric Effects
+idCVar r_cuVolumetric("r_cuVolumetric", "0.0", CVAR_RENDERER | CVAR_ARCHIVE, "Volumetric light scattering intensity (0=off, 1=normal, expensive!)");
+idCVar r_cuVolumetricDensity("r_cuVolumetricDensity", "0.008", CVAR_RENDERER | CVAR_ARCHIVE, "Volumetric fog density (0.001-0.1)");
+idCVar r_cuVolumetricSteps("r_cuVolumetricSteps", "16", CVAR_RENDERER | CVAR_ARCHIVE, "Volumetric ray march steps (4-64)");
+idCVar r_cuVolumetricAnisotropy("r_cuVolumetricAnisotropy", "0.6", CVAR_RENDERER | CVAR_ARCHIVE, "Volumetric scattering anisotropy (-1 to 1)");
+idCVar r_cuVolFalloff("r_cuVolFalloff", "2.0", CVAR_RENDERER | CVAR_ARCHIVE, "Volumetric distance falloff exponent");
+idCVar r_cuVolMaxDist("r_cuVolMaxDist", "500.0", CVAR_RENDERER | CVAR_ARCHIVE, "Volumetric max sampling distance");
 
 idCudaRenderer *g_cuRenderer = NULL;
 
@@ -25,6 +80,16 @@ idCudaRenderer::idCudaRenderer() {
 	d_materials = NULL;
 	d_lights = NULL;
 	d_bvhNodes = NULL;
+
+	// LBVH temporaries
+	d_mortonCodes = NULL;
+	d_sortedIndices = NULL;
+	d_parents = NULL;
+	d_atomicCounters = NULL;
+	allocatedLBVHSize = 0;
+	allocatedTriangles = 0;
+	allocatedBVHNodes = 0;
+	allocatedTriIndices = 0;
 
 	d_framebuffer = NULL;
 	d_outputBuffer = NULL;
@@ -55,11 +120,14 @@ idCudaRenderer::idCudaRenderer() {
 	height = 0;
 	renderWidth = 0;
 	renderHeight = 0;
+	prevRenderWidth = 0;
+	prevRenderHeight = 0;
 
 	timer_start = NULL;
 	timer_stop = NULL;
 	kernel_ms = 0.0f;
 	kernel_fps = 0.0f;
+	stream = 0;
 }
 
 /*
@@ -134,11 +202,11 @@ idCudaRenderer::Init
 bool idCudaRenderer::Init(int w, int h) {
 
 	if (!IsAvailable()) {
-		common->Warning("idCudaPathTracer::Init(): No compatible CUDA device found\n");
+		common->Warning("idCudaRenderer::Init(): No compatible CUDA device found\n");
 		return 0;
 	}
 
-	common->Printf("\n----- Init CUDA Path Tracer -----\n");
+	common->Printf("\n----- Init CUDA Renderer -----\n");
 
 	width = w;
 	height = h;
@@ -192,11 +260,27 @@ void idCudaRenderer::Alloc() {
 	// alloc geometry data
 	CUDA_CHECK_VOID(cudaMalloc(&d_vertices, MAX_TRIANGLES * 3 * sizeof(cudaVertex_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_triangles, MAX_TRIANGLES * sizeof(cudaTriangle_t)));
-	CUDA_CHECK_VOID(cudaMalloc(&d_triIndices, MAX_TRIANGLES * sizeof(int)));
+	allocatedTriangles = MAX_TRIANGLES;
+
+	// BVH nodes and triIndices are dynamically allocated in BuildBVH()
+	d_bvhNodes = NULL;
+	d_triIndices = NULL;
+	allocatedBVHNodes = 0;
+	allocatedTriIndices = 0;
+
+	// LBVH temp buffers are dynamically allocated in BuildBVH()
+	d_mortonCodes = NULL;
+	d_sortedIndices = NULL;
+	d_parents = NULL;
+	d_atomicCounters = NULL;
+	allocatedLBVHSize = 0;
+
 	CUDA_CHECK_VOID(cudaMalloc(&d_materials, MAX_MATERIALS * sizeof(cudaMaterial_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_textures, MAX_TEXTURES * sizeof(cudaTexture_t)));
 	CUDA_CHECK_VOID(cudaMalloc(&d_lights, MAX_LIGHTS * sizeof(cudaLight_t)));
-	CUDA_CHECK_VOID(cudaMalloc(&d_bvhNodes, MAX_BVH_NODES * sizeof(cudaBVHNode_t)));
+
+	// create CUDA stream
+	cudaStreamCreate(&stream);
 	
 	return;
 }
@@ -244,6 +328,28 @@ void idCudaRenderer::Free() {
 		d_bvhNodes = NULL;
 	}
 
+	// free LBVH temporaries
+	if (d_mortonCodes) {
+		cudaFree(d_mortonCodes);
+		d_mortonCodes = NULL;
+	}
+	if (d_sortedIndices) {
+		cudaFree(d_sortedIndices);
+		d_sortedIndices = NULL;
+	}
+	if (d_parents) {
+		cudaFree(d_parents);
+		d_parents = NULL;
+	}
+	if (d_atomicCounters) {
+		cudaFree(d_atomicCounters);
+		d_atomicCounters = NULL;
+	}
+	allocatedLBVHSize = 0;
+	allocatedTriangles = 0;
+	allocatedBVHNodes = 0;
+	allocatedTriIndices = 0;
+
 	if (d_materials) {
 		cudaFree(d_materials);
 		d_materials = NULL;
@@ -278,13 +384,16 @@ void idCudaRenderer::Free() {
 		timer_stop = NULL;
 	}
 
+	if (stream) {
+		cudaStreamDestroy(stream);
+		stream = 0;
+	}
+
 	// clear the rest
 	h_materials.Clear();
 	h_lights.Clear();
 	h_vertices.Clear();
 	h_triangles.Clear();
-	h_bvhNodes.Clear();
-	h_bvhTriIndices.Clear();
 	materialEmission.Clear();
 	materialHash.Free();
 	h_materialPtrs.Clear();
@@ -348,28 +457,11 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 	// update camera
 	UpdateCamera(renderView);
 
-	// set render resolution
-	renderWidth = width;
-	renderHeight = height;
+	// render scale
+	float targetScale = idMath::ClampFloat(0.25f, 1.0f, r_cuRenderScale.GetFloat());
+	bool useAccumulation = r_cuAccumulation.GetBool();
 
-	// upload geometry to GPU if it changed this frame
-	if (need_reload && num_triangles > 0 && num_vertices > 0) {
-		CUDA_CHECK_VOID(cudaMemcpy(d_vertices, h_vertices.Ptr(),
-			num_vertices * sizeof(cudaVertex_t), cudaMemcpyHostToDevice));
-		CUDA_CHECK_VOID(cudaMemcpy(d_triangles, h_triangles.Ptr(),
-			num_triangles * sizeof(cudaTriangle_t), cudaMemcpyHostToDevice));
-
-		if (num_bvh_nodes > 0) {
-			CUDA_CHECK_VOID(cudaMemcpy(d_bvhNodes, h_bvhNodes.Ptr(),
-				num_bvh_nodes * sizeof(cudaBVHNode_t), cudaMemcpyHostToDevice));
-			CUDA_CHECK_VOID(cudaMemcpy(d_triIndices, h_bvhTriIndices.Ptr(),
-				num_triangles * sizeof(int), cudaMemcpyHostToDevice));
-		}
-
-		need_reload = 0;
-	}
-
-	// detect camera or scene changes to reset progressive accumulation
+	// detect camera/scene changes
 	bool cameraChanged = false;
 	for (int i = 0; i < 3; i++) {
 		if (fabsf(cam_pos[i] - prev_cam_pos[i]) > 1e-4f ||
@@ -379,12 +471,10 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 		}
 	}
 
-	// scene is rebuilt every frame (BeginFrame clears geometry), so need_reload indicates a scene change
-	if (cameraChanged || need_reload) {
-		accum_frame = 0;
-		CUDA_CHECK_VOID(cudaMemset(d_framebuffer, 0, width * height * 4 * sizeof(float)));
+	// consume need_reload flag (geometry uploaded in EndFrame)
+	if (need_reload && num_triangles > 0 && num_vertices > 0) {
+		need_reload = 0;
 	}
-	CUDA_CHECK_VOID(cudaMemset(d_outputBuffer, 0, width * height * 4 * sizeof(unsigned char)));
 
 	// save current camera for next frame comparison
 	for (int i = 0; i < 3; i++) {
@@ -392,37 +482,169 @@ void idCudaRenderer::RenderView(const renderView_t* renderView) {
 		prev_cam_forward[i] = cam_forward[i];
 	}
 
-	// render the view using CUDA kernel
-	cudaEventRecord(timer_start);
+	// read user CVar targets with runtime clamping
+	int targetSPP = idMath::ClampInt(1, 64, r_cuSamplesPerPixel.GetInteger());
+	int targetDepth = idMath::ClampInt(1, 16, r_cuMaxDepth.GetInteger());
+	int targetLightSamples = idMath::ClampInt(1, 8, r_cuMaxLightSamples.GetInteger());
+	float targetIndirectProb = idMath::ClampFloat(0.0f, 1.0f, r_cuIndirectProb.GetFloat());
 
-	CUDA_LaunchRenderView(
+	// progressive quality refinement
+	int frame = accum_frame;
+	int activeSPP;
+	int activeDepth;
+	int activeLightSamples;
+	float activeIndirectProb;
+
+	if (cameraChanged) {
+		// minimal quality for responsiveness
+		renderWidth = (int)(width * targetScale);
+		renderHeight = (int)(height * targetScale);
+		activeSPP = 1;
+		activeDepth = 2;
+		activeLightSamples = 1;
+		activeIndirectProb = 0.0f;
+	} else if (frame < 2) {
+		// low quality, target resolution
+		renderWidth = (int)(width * targetScale);
+		renderHeight = (int)(height * targetScale);
+		activeSPP = 1;
+		activeDepth = 2;
+		activeLightSamples = 1;
+		activeIndirectProb = 0.0f;
+	} else if (frame < 4) {
+		// medium quality
+		renderWidth = (int)(width * targetScale);
+		renderHeight = (int)(height * targetScale);
+		activeSPP = idMath::ClampInt(1, targetSPP, 2);
+		activeDepth = idMath::ClampInt(1, targetDepth, 2);
+		activeLightSamples = 1;
+		activeIndirectProb = targetIndirectProb * 0.25f;
+	} else if (frame < 8) {
+		// ramping up
+		renderWidth = (int)(width * targetScale);
+		renderHeight = (int)(height * targetScale);
+		activeSPP = targetSPP;
+		activeDepth = targetDepth;
+		activeLightSamples = idMath::ClampInt(1, targetLightSamples, targetLightSamples / 2 + 1);
+		activeIndirectProb = targetIndirectProb * 0.5f;
+	} else {
+		// full quality
+		renderWidth = (int)(width * targetScale);
+		renderHeight = (int)(height * targetScale);
+		activeSPP = targetSPP;
+		activeDepth = targetDepth;
+		activeLightSamples = targetLightSamples;
+		activeIndirectProb = targetIndirectProb;
+	}
+
+	// ensure minimum render dimensions
+	if (renderWidth < 64) renderWidth = 64;
+	if (renderHeight < 64) renderHeight = 64;
+
+	// resolution change detection
+	if (renderWidth != prevRenderWidth || renderHeight != prevRenderHeight) {
+		accum_frame = 0;
+		frame = 0;
+		CUDA_CHECK_VOID(cudaMemset(d_framebuffer, 0, width * height * 4 * sizeof(float)));
+	}
+	prevRenderWidth = renderWidth;
+	prevRenderHeight = renderHeight;
+
+	// accumulation reset on camera/scene change
+	if (cameraChanged || !useAccumulation) {
+		accum_frame = 0;
+		CUDA_CHECK_VOID(cudaMemset(d_framebuffer, 0, width * height * 4 * sizeof(float)));
+	}
+	CUDA_CHECK_VOID(cudaMemset(d_outputBuffer, 0, width * height * 4 * sizeof(unsigned char)));
+
+	//////////////////////////////
+	// renderer
+	//////////////////////////////
+	cudaEventRecord(timer_start, stream);
+
+	// sky color from CVars
+	float skyZenith[3] = {
+		r_cuSkyColorZenithR.GetFloat(),
+		r_cuSkyColorZenithG.GetFloat(),
+		r_cuSkyColorZenithB.GetFloat()
+	};
+	float skyHorizon[3] = {
+		r_cuSkyColorHorizonR.GetFloat(),
+		r_cuSkyColorHorizonG.GetFloat(),
+		r_cuSkyColorHorizonB.GetFloat()
+	};
+	float skyGround[3] = {
+		r_cuSkyColorGroundR.GetFloat(),
+		r_cuSkyColorGroundG.GetFloat(),
+		r_cuSkyColorGroundB.GetFloat()
+	};
+
+	// clamp light count to prevent reading past the GPU buffer
+	int numLightsForKernel = h_lights.Num();
+	if (numLightsForKernel > MAX_LIGHTS) numLightsForKernel = MAX_LIGHTS;
+
+	LaunchPathTracingKernel(
 		d_vertices,
 		d_triangles,
+		d_bvhNodes,
 		d_triIndices,
 		d_materials,
 		d_textures,
 		d_lights,
-		h_lights.Num(),
-		d_bvhNodes,
-		num_bvh_nodes,
+		numLightsForKernel,
+		r_cuMode.GetInteger(),
 		d_framebuffer,
-		d_outputBuffer,
 		renderWidth,
 		renderHeight,
-		num_triangles,
 		cam_pos,
 		cam_forward,
 		cam_right,
 		cam_up,
 		fov_x,
 		fov_y,
-		r_cuRenderMode.GetInteger(),
-		accum_frame
+		activeSPP,
+		activeDepth,
+		activeLightSamples,
+		accum_frame,
+		fmaxf(0.0f, r_cuEmissionBoost.GetFloat()),
+		activeIndirectProb,
+		r_cuRussianRoulette.GetInteger(),
+		idMath::ClampInt(0, 16, r_cuRRMinBounces.GetInteger()),
+		idMath::ClampFloat(0.01f, 0.95f, r_cuRRSurvivalMin.GetFloat()),
+		fmaxf(0.0f, r_cuEarlyTermThreshold.GetFloat()),
+		fmaxf(0.0f, r_cuFireflyClamp.GetFloat()),
+		fmaxf(0.0f, r_cuThroughputClamp.GetFloat()),
+		idMath::ClampFloat(0.0001f, 0.1f, r_cuRayOffset.GetFloat()),
+		fmaxf(0.0f, r_cuSpecularBoost.GetFloat()),
+		fmaxf(0.0f, r_cuSkyIntensity.GetFloat()),
+		skyZenith,
+		skyHorizon,
+		skyGround,
+		fmaxf(0.0f, r_cuVolumetricDensity.GetFloat()),
+		idMath::ClampInt(1, 128, r_cuVolumetricSteps.GetInteger()),
+		idMath::ClampFloat(-0.999f, 0.999f, r_cuVolumetricAnisotropy.GetFloat()),
+		fmaxf(0.0f, r_cuVolFalloff.GetFloat()),
+		fmaxf(0.0f, r_cuVolMaxDist.GetFloat()),
+		fmaxf(0.0f, r_cuSoftShadowScale.GetFloat()),
+		stream
 	);
 
 	accum_frame++;
 
-	cudaEventRecord(timer_stop);
+	// tone mapping pass: HDR accumulation -> LDR output
+	LaunchToneMappingKernel(
+		d_framebuffer,
+		d_outputBuffer,
+		renderWidth,
+		renderHeight,
+		fmaxf(0.001f, r_cuExposure.GetFloat()),
+		idMath::ClampFloat(0.1f, 10.0f, r_cuGamma.GetFloat()),
+		idMath::ClampInt(0, 2, r_cuToneMapMode.GetInteger()),
+		accum_frame,
+		stream
+	);
+
+	cudaEventRecord(timer_stop, stream);
 
 	// synchronize to ensure kernel is complete before readback
 	cudaDeviceSynchronize();
@@ -447,6 +669,7 @@ idCudaRenderer::CopyToBackbuffer
 ========================
 */
 void idCudaRenderer::CopyToBackbuffer(unsigned char* dest, int destWidth, int destHeight) {
+
 	if (!d_outputBuffer || !dest) {
 		return;
 	}
@@ -485,6 +708,18 @@ void idCudaRenderer::CopyToBackbuffer(unsigned char* dest, int destWidth, int de
 	}
 
 	return;
+}
+
+/*
+========================
+idCudaRenderer::ResetAccumulation
+========================
+*/
+void idCudaRenderer::ResetAccumulation() {
+	accum_frame = 0;
+	if (d_framebuffer) {
+		cudaMemsetAsync(d_framebuffer, 0, width * height * 4 * sizeof(float), stream);
+	}
 }
 
 #endif // HAVE_CUDA

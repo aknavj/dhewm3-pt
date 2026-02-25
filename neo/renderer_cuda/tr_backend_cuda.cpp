@@ -8,6 +8,10 @@
 
 // extern console variables
 extern idCVar r_cuDraw;
+extern idCVar r_frameStats;
+extern void R_CUDA_Compare_f(const idCmdArgs& args);
+extern void R_CUDA_Sequence_f(const idCmdArgs& args);
+extern void R_CUDA_Abort_f(const idCmdArgs& args);
 
 /*
 ========================
@@ -37,6 +41,12 @@ void RB_CUDA_Init() {
 			common->Printf("Use 'r_cuDraw 0' to disable\n\n");
 		}
 	}
+
+	cmdSystem->AddCommand("r_cuCompare", R_CUDA_Compare_f, CMD_FL_RENDERER, "Compare CUDA renderer output to GL image");
+	cmdSystem->AddCommand("r_cuSequence", R_CUDA_Sequence_f, CMD_FL_RENDERER, "Render a sequence of frames with CUDA renderer for benchmarking");
+	cmdSystem->AddCommand("r_cuAbort", R_CUDA_Abort_f, CMD_FL_RENDERER, "Abort CUDA renderer sequence benchmark");
+	cmdSystem->AddCommand("r_glSequence", R_GLSequence_f, CMD_FL_RENDERER, "Render a sequence of OpenGL frames as screenshots");
+	cmdSystem->AddCommand("r_glAbort", R_GLAbort_f, CMD_FL_RENDERER, "Abort OpenGL sequence render");
 
 }
 
@@ -87,7 +97,7 @@ void RB_CUDA_DrawView() {
 		// get material index
         int materialIndex = 0;
         if (surf->material) {
-            materialIndex = g_cuRenderer->AddMaterial(surf->material, surf->shaderRegisters);
+            materialIndex = g_cuRenderer->GetOrSetMaterial(surf->material, surf->shaderRegisters);
         }
 
         // add triangle data to CUDA renderer

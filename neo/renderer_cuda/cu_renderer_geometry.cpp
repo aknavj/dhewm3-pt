@@ -6,7 +6,6 @@
 
 // extern console variables
 extern idCVar r_cuDebug;
-extern idCVar r_cuRenderMode;
 
 /*
 ========================
@@ -43,13 +42,13 @@ void idCudaRenderer::AddTriangle(const idDrawVert* verts, int numVerts, const in
 			v.tangent[1] = modelMatrix[1] * tx + modelMatrix[5] * ty + modelMatrix[9]  * tz;
 			v.tangent[2] = modelMatrix[2] * tx + modelMatrix[6] * ty + modelMatrix[10] * tz;
 
-			// rotate bitangent by the 3x3 upper-left of modelMatrix
+			// rotate binormal by the 3x3 upper-left of modelMatrix
 			float bx = verts[i].tangents[1][0];
 			float by = verts[i].tangents[1][1];
 			float bz = verts[i].tangents[1][2];
-			v.bitangent[0] = modelMatrix[0] * bx + modelMatrix[4] * by + modelMatrix[8]  * bz;
-			v.bitangent[1] = modelMatrix[1] * bx + modelMatrix[5] * by + modelMatrix[9]  * bz;
-			v.bitangent[2] = modelMatrix[2] * bx + modelMatrix[6] * by + modelMatrix[10] * bz;
+			v.binormal[0] = modelMatrix[0] * bx + modelMatrix[4] * by + modelMatrix[8]  * bz;
+			v.binormal[1] = modelMatrix[1] * bx + modelMatrix[5] * by + modelMatrix[9]  * bz;
+			v.binormal[2] = modelMatrix[2] * bx + modelMatrix[6] * by + modelMatrix[10] * bz;
 		} else {
 			v.position[0] = verts[i].xyz[0];
 			v.position[1] = verts[i].xyz[1];
@@ -63,9 +62,9 @@ void idCudaRenderer::AddTriangle(const idDrawVert* verts, int numVerts, const in
 			v.tangent[1] = verts[i].tangents[0][1];
 			v.tangent[2] = verts[i].tangents[0][2];
 
-			v.bitangent[0] = verts[i].tangents[1][0];
-			v.bitangent[1] = verts[i].tangents[1][1];
-			v.bitangent[2] = verts[i].tangents[1][2];
+			v.binormal[0] = verts[i].tangents[1][0];
+			v.binormal[1] = verts[i].tangents[1][1];
+			v.binormal[2] = verts[i].tangents[1][2];
 		}
 
 		// normalize normal
@@ -92,20 +91,26 @@ void idCudaRenderer::AddTriangle(const idDrawVert* verts, int numVerts, const in
 			v.tangent[2] = 0.0f;
 		}
 
-		// normalize bitangent
-		float bLen = sqrtf(v.bitangent[0] * v.bitangent[0] + v.bitangent[1] * v.bitangent[1] + v.bitangent[2] * v.bitangent[2]);
+		// normalize binormal
+		float bLen = sqrtf(v.binormal[0] * v.binormal[0] + v.binormal[1] * v.binormal[1] + v.binormal[2] * v.binormal[2]);
 		if (bLen > 1e-6f) {
-			v.bitangent[0] /= bLen;
-			v.bitangent[1] /= bLen;
-			v.bitangent[2] /= bLen;
+			v.binormal[0] /= bLen;
+			v.binormal[1] /= bLen;
+			v.binormal[2] /= bLen;
 		} else {
-			v.bitangent[0] = 0.0f;
-			v.bitangent[1] = 1.0f;
-			v.bitangent[2] = 0.0f;
+			v.binormal[0] = 0.0f;
+			v.binormal[1] = 1.0f;
+			v.binormal[2] = 0.0f;
 		}
 
 		v.texcoord[0] = verts[i].st[0];
 		v.texcoord[1] = verts[i].st[1];
+
+		// Extract vertex color (byte to float normalization)
+		v.color[0] = verts[i].color[0] / 255.0f;
+		v.color[1] = verts[i].color[1] / 255.0f;
+		v.color[2] = verts[i].color[2] / 255.0f;
+		v.color[3] = verts[i].color[3] / 255.0f;
 		
 		h_vertices.Append(v);
 	}
@@ -129,6 +134,73 @@ void idCudaRenderer::AddTriangle(const idDrawVert* verts, int numVerts, const in
 		tri.bounds[5] = Max(v0.position[2], Max(v1.position[2], v2.position[2]));
 
 		h_triangles.Append(tri);
+
+		// create area light for emissive materials
+		if (materialIndex >= 0 && materialIndex < materialEmission.Num()
+			&& materialIndex < h_materials.Num()) {
+			const cudaMaterial_t& matRef = h_materials[materialIndex];
+			const idVec3& emission = materialEmission[materialIndex];
+			float emissive = emission.x + emission.y + emission.z;
+			
+			// skip area light creation for blended/particle materials
+			// they are not real emissive surfaces, just overlays
+			bool isBlendedOverlay = (matRef.blendMode > 0 || matRef.isAmbientOnly);
+
+			// only create lights for significantly emissive surfaces
+			if (emissive > 0.5f && !isBlendedOverlay && h_lights.Num() < MAX_LIGHTS) {
+				// create area light at triangle center
+				idVec3 center(
+					(v0.position[0] + v1.position[0] + v2.position[0]) / 3.0f,
+					(v0.position[1] + v1.position[1] + v2.position[1]) / 3.0f,
+					(v0.position[2] + v1.position[2] + v2.position[2]) / 3.0f
+				);
+				
+				// calculate triangle area for light intensity
+				idVec3 edge1(
+					v1.position[0] - v0.position[0],
+					v1.position[1] - v0.position[1],
+					v1.position[2] - v0.position[2]
+				);
+				idVec3 edge2(
+					v2.position[0] - v0.position[0],
+					v2.position[1] - v0.position[1],
+					v2.position[2] - v0.position[2]
+				);
+				idVec3 cross = edge1.Cross(edge2);
+				float area = cross.Length() * 0.5f;
+				
+				cudaLight_t light;
+				light.type = 2;  // area light
+				light.position[0] = center.x;
+				light.position[1] = center.y;
+				light.position[2] = center.z;
+
+				// clamp light colors to prevent color explosions (green dots, etc.)
+				light.color[0] = idMath::ClampFloat(0.0f, 1.0f, emission.x);
+				light.color[1] = idMath::ClampFloat(0.0f, 1.0f, emission.y);
+				light.color[2] = idMath::ClampFloat(0.0f, 1.0f, emission.z);
+
+				// use sqrt(area) with lower multiplier to prevent bright dots
+				light.intensity = idMath::ClampFloat(0.0f, 10.0f, emissive * idMath::Sqrt(area) * 0.25f);
+				light.radius = idMath::Sqrt(area);
+				light.area[0] = area;
+				light.area[1] = 0.0f;
+				light.area[2] = 0.0f;
+				light.textureIndex = materialIndex >= 0 ? h_materials[materialIndex].albedoTexture : -1;
+
+				light.coneAngle = 0.0f;
+				light.coneFalloff = 0.0f;
+				
+				// area lights don't use projection
+				memset(light.lightProject, 0, sizeof(light.lightProject));
+				light.projectedTextureIndex = -1;
+				light.lightRadius3[0] = light.lightRadius3[1] = light.lightRadius3[2] = light.radius;
+				light.right[0] = light.right[1] = light.right[2] = 0.0f;
+				light.up[0] = light.up[1] = light.up[2] = 0.0f;
+				
+				h_lights.Append(light);
+			}
+		}
 	}
 
 	return;

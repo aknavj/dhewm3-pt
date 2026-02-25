@@ -8,10 +8,10 @@ extern idCVar r_cuDebug;
 
 /*
 ========================
-idCudaRenderer::AddMaterial
+idCudaRenderer::GetOrSetMaterial
 ========================
 */
-int idCudaRenderer::AddMaterial(const idMaterial* material, const float* shaderRegisters) {
+int idCudaRenderer::GetOrSetMaterial(const idMaterial* material, const float* shaderRegisters) {
 
     if (!material) {
         return 0;
@@ -27,39 +27,45 @@ int idCudaRenderer::AddMaterial(const idMaterial* material, const float* shaderR
 
     int index = nextMaterialIndex;
     if (index >= MAX_MATERIALS) {
-		common->Warning("idCudaRenderer::AddMaterial(): Maximum material count (%d) reached, cannot add '%s'\n", 
+		common->Warning("idCudaRenderer::GetOrSetMaterial(): Maximum material count (%d) reached, cannot add '%s'\n", 
 			MAX_MATERIALS, material->GetName());
 		return 0;
 	}
 
     if (r_cuDebug.GetBool()) {
-		common->Printf("idCudaRenderer::AddMaterial(): Material %d: %s\n", index, material->GetName());
+		common->Printf("idCudaRenderer::GetOrSetMaterial(): Material %d: %s\n", index, material->GetName());
 	}
 
     // grow the lists
     cudaMaterial_t mat;
+    memset(&mat, 0, sizeof(mat));
     mat.albedo[0] = 1.0f;
     mat.albedo[1] = 1.0f;
     mat.albedo[2] = 1.0f;
-    mat.specular[0] = 0.0f;
-    mat.specular[1] = 0.0f;
-    mat.specular[2] = 0.0f;
+    mat.albedo[3] = 1.0f;
     mat.emission[0] = 0.0f;
     mat.emission[1] = 0.0f;
     mat.emission[2] = 0.0f;
+    mat.metallic = 0.0f;
+    mat.roughness = 0.7f;
+    mat.ior = 1.5f;
+    mat.transmission = 0.0f;
     mat.albedoTexture = -1;
     mat.normalTexture = -1;
     mat.specularTexture = -1;
-    mat.emissionTexture = -1;
-    mat.blendTexture = -1;
-    mat.alphaMaskTexture = -1;
-    mat.blendColor[0] = 1.0f;
-    mat.blendColor[1] = 1.0f;
-    mat.blendColor[2] = 1.0f;
-    mat.blendColor[3] = 1.0f;
     mat.alphaTest = 0.0f;
-    mat.coverage = 0;
     mat.blendMode = 0;
+    mat.useVertexColor = 0;
+    mat.isAmbientOnly = 0;
+    mat.noShadows = 0;
+    mat.bumpScale = 1.0f;
+    mat.texTransform[0] = 1.0f;
+    mat.texTransform[1] = 1.0f;
+    mat.texTransform[2] = 0.0f;
+    mat.texTransform[3] = 0.0f;
+    mat.texTransform[4] = 0.0f;
+    mat.texTransform[5] = 0.0f;
+    mat.polygonOffset = 0.0f;
     h_materials.Append(mat);
     materialEmission.Append(idVec3(0.0f, 0.0f, 0.0f));
     h_materialPtrs.Append(material);
@@ -84,55 +90,63 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
 		h_materials.SetNum(index + 1);
 		materialEmission.SetNum(index + 1);
 		for (int i = oldSize; i < index; i++) {
+			memset(&h_materials[i], 0, sizeof(cudaMaterial_t));
 			h_materials[i].albedo[0] = 0.5f;
 			h_materials[i].albedo[1] = 0.5f;
 			h_materials[i].albedo[2] = 0.5f;
-            h_materials[i].specular[0] = 1.0f;
-            h_materials[i].specular[1] = 1.0f;
-            h_materials[i].specular[2] = 1.0f;
+			h_materials[i].albedo[3] = 1.0f;
 			h_materials[i].emission[0] = 0.0f;
 			h_materials[i].emission[1] = 0.0f;
 			h_materials[i].emission[2] = 0.0f;
+			h_materials[i].metallic = 0.0f;
+			h_materials[i].roughness = 0.7f;
+			h_materials[i].ior = 1.5f;
+			h_materials[i].transmission = 0.0f;
             h_materials[i].albedoTexture = -1;
             h_materials[i].normalTexture = -1;
             h_materials[i].specularTexture = -1;
-            h_materials[i].emissionTexture = -1;
-            h_materials[i].blendTexture = -1;
-            h_materials[i].alphaMaskTexture = -1;
-            h_materials[i].blendColor[0] = 1.0f;
-            h_materials[i].blendColor[1] = 1.0f;
-            h_materials[i].blendColor[2] = 1.0f;
-            h_materials[i].blendColor[3] = 1.0f;
             h_materials[i].alphaTest = 0.0f;
-            h_materials[i].coverage = 0;
             h_materials[i].blendMode = 0;
+			h_materials[i].useVertexColor = 0;
+			h_materials[i].isAmbientOnly = 0;
+			h_materials[i].noShadows = 0;
+			h_materials[i].bumpScale = 1.0f;
+			h_materials[i].texTransform[0] = 1.0f;
+			h_materials[i].texTransform[1] = 1.0f;
+			h_materials[i].polygonOffset = 0.0f;
 			materialEmission[i].Set(0.0f, 0.0f, 0.0f);
 		}
 	}
 
     cudaMaterial_t mat;
+    memset(&mat, 0, sizeof(mat));
     mat.albedo[0] = 0.5f;
     mat.albedo[1] = 0.5f;
     mat.albedo[2] = 0.5f;
-    mat.specular[0] = 1.0f;
-    mat.specular[1] = 1.0f;
-    mat.specular[2] = 1.0f;
+    mat.albedo[3] = 1.0f;
     mat.emission[0] = 0.0f;
     mat.emission[1] = 0.0f;
     mat.emission[2] = 0.0f;
+    mat.metallic = 0.0f;
+    mat.roughness = 0.7f;
+    mat.ior = 1.5f;
+    mat.transmission = 0.0f;
     mat.albedoTexture = -1;
     mat.normalTexture = -1;
     mat.specularTexture = -1;
-    mat.emissionTexture = -1;
-    mat.blendTexture = -1;
-    mat.alphaMaskTexture = -1;
-    mat.blendColor[0] = 1.0f;
-    mat.blendColor[1] = 1.0f;
-    mat.blendColor[2] = 1.0f;
-    mat.blendColor[3] = 1.0f;
     mat.alphaTest = 0.0f;
-    mat.coverage = 0;
     mat.blendMode = 0;
+    mat.useVertexColor = 0;
+    mat.isAmbientOnly = 0;
+    mat.noShadows = 0;
+    mat.bumpScale = 1.0f;
+    mat.texTransform[0] = 1.0f;
+    mat.texTransform[1] = 1.0f;
+    mat.texTransform[2] = 0.0f;
+    mat.texTransform[3] = 0.0f;
+    mat.texTransform[4] = 0.0f;
+    mat.texTransform[5] = 0.0f;
+    mat.polygonOffset = 0.0f;
 
     if (!material) {
         h_materials[index] = mat;
@@ -148,13 +162,41 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
     }
 
     // extract coverage type and alpha test threshold from engine material
+    int coverage = 0; // local: 0=opaque, 1=perforated, 2=translucent
     materialCoverage_t cov = material->Coverage();
     if (cov == MC_PERFORATED) {
-        mat.coverage = 1;
+        coverage = 1;
         mat.alphaTest = 0.5f; // default threshold for perforated
     } else if (cov == MC_TRANSLUCENT) {
-        mat.coverage = 2;
+        coverage = 2;
         mat.alphaTest = 0.0f; // translucent uses continuous alpha
+    }
+
+    // extract noShadows flag from material (SurfaceCastsShadow checks MF_NOSHADOWS and MF_FORCESHADOWS)
+    if (!material->SurfaceCastsShadow()) {
+        mat.noShadows = 1;
+    }
+
+    // detect vertex color usage from stages (particles use per-vertex alpha for opacity)
+    for (int i = 0; i < material->GetNumStages(); i++) {
+        const shaderStage_t* stage = material->GetStage(i);
+        if (stage && (stage->vertexColor == SVC_MODULATE || stage->vertexColor == SVC_INVERSE_MODULATE)) {
+            mat.useVertexColor = 1;
+            break;
+        }
+    }
+
+    // check if material is ambient-only (no diffuse/bump/specular interaction stages)
+    bool hasInteraction = false;
+    for (int i = 0; i < material->GetNumStages(); i++) {
+        const shaderStage_t* stage = material->GetStage(i);
+        if (stage && (stage->lighting == SL_DIFFUSE || stage->lighting == SL_BUMP || stage->lighting == SL_SPECULAR)) {
+            hasInteraction = true;
+            break;
+        }
+    }
+    if (!hasInteraction && material->GetNumStages() > 0) {
+        mat.isAmbientOnly = 1;
     }
 
     // resolve constant registers for this material
@@ -259,7 +301,7 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
     bool hasDiffuse = (diffuseStage != NULL);
 
     // validate perforated coverage
-    if (mat.coverage == 1) {
+    if (coverage == 1) {
         bool usableAlphaTest = false;
         if (diffuseStage && diffuseStage->hasAlphaTest) usableAlphaTest = true;
         if (ambientBaseStage && ambientBaseStage->hasAlphaTest) usableAlphaTest = true;
@@ -268,14 +310,14 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
             if (r_cuDebug.GetBool()) {
                 common->Printf("  coverage=1 but no usable alpha-tested stage, downgrading to opaque\n");
             }
-            mat.coverage = 0;
+            coverage = 0;
             mat.alphaTest = 0.0f;
         }
     }
 
     if (r_cuDebug.GetBool()) {
         common->Printf("  stages: coverage=%d ambBase=%s ambGlow=%s ambMask=%s diff=%s norm=%s spec=%s\n",
-            mat.coverage,
+            coverage,
             ambientBaseStage ? "yes" : "no",
             ambientGlowStage ? "yes" : "no",
             ambientMaskStage ? "yes" : "no",
@@ -293,7 +335,7 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
         }
 
         // refine alpha test threshold from stage draw state bits
-        if (mat.coverage == 1 || mat.coverage == 2) {
+        if (coverage == 1 || coverage == 2) {
             int atest = diffuseStage->drawStateBits & GLS_ATEST_BITS;
             if (atest & GLS_ATEST_GE_128) {
                 mat.alphaTest = 128.0f / 255.0f; // ~0.502
@@ -306,15 +348,16 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
 
         if (r_cuDebug.GetBool()) {
             common->Printf("idCudaRenderer::SetMaterial(): Material %d: %s (coverage=%d, alphaTest=%.3f)\n",
-                index, material->GetName(), mat.coverage, mat.alphaTest);
+                index, material->GetName(), coverage, mat.alphaTest);
         }
     }
 
-    // process glow stage
-    if (ambientGlowStage && ambientGlowStage->texture.image) {
+    // process glow stage (emission)
+    int emissionTextureIdx = -1;
+    if (ambientGlowStage && ambientGlowStage->texture.image && !mat.isAmbientOnly) {
         int emTex = AddTexture(ambientGlowStage->texture.image);
         if (emTex >= 0) {
-            mat.emissionTexture = emTex;
+            emissionTextureIdx = emTex;
             float emR = SAFE_REG(ambientGlowStage->color.registers[0]);
             float emG = SAFE_REG(ambientGlowStage->color.registers[1]);
             float emB = SAFE_REG(ambientGlowStage->color.registers[2]);
@@ -325,11 +368,10 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
         }
     }
 
-    // process maskcolor stage
+    // process maskcolor stage (not stored in struct, just used for debug)
     if (ambientMaskStage && ambientMaskStage->texture.image) {
         int maskTex = AddTexture(ambientMaskStage->texture.image);
         if (maskTex >= 0) {
-            mat.alphaMaskTexture = maskTex;
             if (r_cuDebug.GetBool()) {
                 common->Printf("  -> alphaMaskTexture=%d from maskcolor stage\n", maskTex);
             }
@@ -349,9 +391,30 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
                 mat.albedo[0] = SAFE_REG(albedoSource->color.registers[0]);
                 mat.albedo[1] = SAFE_REG(albedoSource->color.registers[1]);
                 mat.albedo[2] = SAFE_REG(albedoSource->color.registers[2]);
+                mat.albedo[3] = idMath::ClampFloat(0.0f, 1.0f, SAFE_REG(albedoSource->color.registers[3]));
+
+                // extract blend mode from ambient stage draw state bits
+                int srcBlend = albedoSource->drawStateBits & GLS_SRCBLEND_BITS;
+                int dstBlend = albedoSource->drawStateBits & GLS_DSTBLEND_BITS;
+
+                if (srcBlend == GLS_SRCBLEND_ONE && dstBlend == GLS_DSTBLEND_ONE) {
+                    mat.blendMode = 2;  // Additive (GL_ONE, GL_ONE)
+                } else if (srcBlend == GLS_SRCBLEND_SRC_ALPHA && dstBlend == GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA) {
+                    mat.blendMode = 1;  // Alpha blend
+                } else if ((srcBlend == GLS_SRCBLEND_DST_COLOR && dstBlend == GLS_DSTBLEND_ZERO)
+                        || (srcBlend == GLS_SRCBLEND_ZERO && dstBlend == GLS_DSTBLEND_SRC_COLOR)) {
+                    mat.blendMode = 3;  // Multiply/filter
+                } else if (srcBlend != GLS_SRCBLEND_ONE || dstBlend != GLS_DSTBLEND_ZERO) {
+                    // Non-opaque blend mode: check for additive variant (e.g. GL_SRC_ALPHA + GL_ONE)
+                    if (dstBlend == GLS_DSTBLEND_ONE) {
+                        mat.blendMode = 2;  // Additive variant
+                    } else {
+                        mat.blendMode = 1;  // Default to alpha blend for any other non-opaque
+                    }
+                }
 
                 // ambient-only surfaces without a glow map get mild self-emission
-                if (mat.coverage == 0 && mat.emissionTexture < 0) {
+                if (mat.blendMode == 0 && emissionTextureIdx < 0) {
                     mat.emission[0] = mat.albedo[0] * 0.3f;
                     mat.emission[1] = mat.albedo[1] * 0.3f;
                     mat.emission[2] = mat.albedo[2] * 0.3f;
@@ -364,7 +427,7 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
     // classify blend modes for translucent materials
     {
         const shaderStage_t *blendStage = ambientBaseStage ? ambientBaseStage : ambientGlowStage;
-        if (blendStage && mat.coverage == 2) {
+        if (blendStage && coverage == 2) {
             int ambSrc = blendStage->drawStateBits & GLS_SRCBLEND_BITS;
             int ambDst = blendStage->drawStateBits & GLS_DSTBLEND_BITS;
 
@@ -375,20 +438,20 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
                          || (ambSrc == GLS_SRCBLEND_ZERO && ambDst == GLS_DSTBLEND_SRC_COLOR);
 
             if (isAdditive) {
-                mat.blendMode = 1;
+                mat.blendMode = 2; // additive
             } else if (isAlphaBlend || isPremultAlpha) {
-                mat.blendMode = 2;
+                mat.blendMode = 1; // alpha blend
             } else if (isFilter) {
-                mat.blendMode = 3;
+                mat.blendMode = 3; // multiply/filter
             }
 
-            // grab blend stage texture for blended surfaces (particles, decals, etc.)
-            if (mat.blendMode > 0 && blendStage->texture.image) {
-                mat.blendTexture = AddTexture(blendStage->texture.image);
-                mat.blendColor[0] = SAFE_REG(blendStage->color.registers[0]);
-                mat.blendColor[1] = SAFE_REG(blendStage->color.registers[1]);
-                mat.blendColor[2] = SAFE_REG(blendStage->color.registers[2]);
-                mat.blendColor[3] = SAFE_REG(blendStage->color.registers[3]);
+            // for blended surfaces, use the blend stage texture as albedo if we don't have one
+            if (mat.blendMode > 0 && blendStage->texture.image && mat.albedoTexture < 0) {
+                mat.albedoTexture = AddTexture(blendStage->texture.image);
+                mat.albedo[0] = SAFE_REG(blendStage->color.registers[0]);
+                mat.albedo[1] = SAFE_REG(blendStage->color.registers[1]);
+                mat.albedo[2] = SAFE_REG(blendStage->color.registers[2]);
+                mat.albedo[3] = SAFE_REG(blendStage->color.registers[3]);
             }
 
             if (r_cuDebug.GetBool()) {
@@ -417,21 +480,6 @@ void idCudaRenderer::SetMaterial(int index, const idMaterial* material, const fl
     }   
 
     #undef SAFE_REG
-
-    if (r_cuDebug.GetBool()) {
-        common->Printf("  -> Final: albTex=%d blendTex=%d emTex=%d maskTex=%d blendMode=%d coverage=%d albedo=(%.2f,%.2f,%.2f) blendCol=(%.2f,%.2f,%.2f,%.2f)\n",
-            mat.albedoTexture, mat.blendTexture, mat.emissionTexture, mat.alphaMaskTexture, mat.blendMode, mat.coverage,
-            mat.albedo[0], mat.albedo[1], mat.albedo[2],
-            mat.blendColor[0], mat.blendColor[1], mat.blendColor[2], mat.blendColor[3]);
-    }
-
-    // warn about materials with no usable textures — these will render as flat white
-    if (mat.albedoTexture < 0 && mat.blendTexture < 0 && mat.emissionTexture < 0) {
-        if (material->GetNumStages() > 0) {
-            common->Warning("SetMaterial[%d]: %s has %d stages but NO textures loaded (defaulted/not-loaded?)\n",
-                index, material->GetName(), material->GetNumStages());
-        }
-    }
 
     h_materials[index] = mat;
 }

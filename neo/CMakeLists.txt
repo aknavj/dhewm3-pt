@@ -692,11 +692,14 @@ if(HAVE_CUDA)
 		renderer_cuda/cu_renderer_light.cpp
 		renderer_cuda/cu_renderer_bvh.cpp
 		renderer_cuda/tr_backend_cuda.cpp
+		renderer_cuda/tr_render_cu_stats.cpp
+		renderer_cuda/tr_render_gl_stats.cpp
 	)
 
 	# CUDA kernel file
 	set(src_renderer_cuda
 		renderer_cuda/cu_renderer_main.cu
+		renderer_cuda/cu_renderer_lbvh.cu
 	)
 
 	# Set CUDA compilation flags

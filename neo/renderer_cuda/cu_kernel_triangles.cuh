@@ -10,38 +10,134 @@
 
 /*
 ========================
+IntersectAABB_Simple
+Ray-AABB test for BVH traversal
+========================
+*/
+__device__ __forceinline__ bool IntersectAABB_Simple(
+	float origX, float origY, float origZ,
+	float invDirX, float invDirY, float invDirZ,
+	const float* bounds,
+	float maxT
+) {
+	float t1 = (bounds[0] - origX) * invDirX;
+	float t2 = (bounds[3] - origX) * invDirX;
+	float tmin = fminf(t1, t2);
+	float tmax = fmaxf(t1, t2);
+
+	t1 = (bounds[1] - origY) * invDirY;
+	t2 = (bounds[4] - origY) * invDirY;
+	tmin = fmaxf(tmin, fminf(t1, t2));
+	tmax = fminf(tmax, fmaxf(t1, t2));
+
+	t1 = (bounds[2] - origZ) * invDirZ;
+	t2 = (bounds[5] - origZ) * invDirZ;
+	tmin = fmaxf(tmin, fminf(t1, t2));
+	tmax = fminf(tmax, fmaxf(t1, t2));
+
+	return tmax >= fmaxf(tmin, 0.0f) && tmin < maxT;
+}
+
+/*
+========================
+IntersectTriangle_Simple
+Möller-Trumbore intersection, returns t (or -1 on miss)
+========================
+*/
+__device__ __forceinline__ float IntersectTriangle_Simple(
+	float origX, float origY, float origZ,
+	float dirX, float dirY, float dirZ,
+	const cudaVertex_t* vertices,
+	const cudaTriangle_t& tri
+) {
+	const float* v0 = vertices[tri.vertexIndices[0]].position;
+	const float* v1 = vertices[tri.vertexIndices[1]].position;
+	const float* v2 = vertices[tri.vertexIndices[2]].position;
+
+	float e1[3] = { v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2] };
+	float e2[3] = { v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2] };
+
+	float h[3];
+	float d[3] = { dirX, dirY, dirZ };
+	cross3(d, e2, h);
+	float a = dot3(e1, h);
+
+	if (fabsf(a) < 1e-7f) return -1.0f;
+
+	float f = 1.0f / a;
+	float s[3] = { origX - v0[0], origY - v0[1], origZ - v0[2] };
+	float u = f * dot3(s, h);
+	if (u < 0.0f || u > 1.0f) return -1.0f;
+
+	float q[3];
+	cross3(s, e1, q);
+	float v = f * dot3(d, q);
+	if (v < 0.0f || u + v > 1.0f) return -1.0f;
+
+	float t = f * dot3(e2, q);
+	return (t > 1e-4f) ? t : -1.0f;
+}
+
+/*
+========================
 TriangleDrawKernel
+Simple BVH debug visualization — random color per triangle.
 ========================
 */
 __global__ __forceinline__ void TriangleDrawKernel(
 	const cudaVertex_t* vertices,
 	const cudaTriangle_t* triangles,
-	const int* triIndices,
 	const cudaBVHNode_t* bvhNodes,
-	int numBVHNodes,
+	const int* triIndices,
+	const cudaMaterial_t* materials,
+	const cudaTexture_t* textures,
+	const cudaLight_t* lights,
+	int numLights,
 	float* framebuffer,
-	unsigned char* outputBuffer,
 	int width,
 	int height,
-	int numTriangles,
 	const float* cameraPos,
 	const float* cameraForward,
 	const float* cameraRight,
 	const float* cameraUp,
-	float fov_x,
-	float fov_y
+	float fov,
+	float fovY,
+	int samplesPerPixel,
+	int maxDepth,
+	int maxLightSamples,
+	int frameIndex,
+	float emissionBoost,
+	float indirectProb,
+	int rrEnabled,
+	int rrMinBounces,
+	float rrSurvivalMin,
+	float earlyTermThreshold,
+	float fireflyClamp,
+	float throughputClamp,
+	float rayOffset,
+	float specularBoost,
+	float skyIntensity,
+	const float* skyColorZenith,
+	const float* skyColorHorizon,
+	const float* skyColorGround,
+	float volumetricDensity,
+	int volumetricSteps,
+	float volumetricAnisotropy,
+	float volFalloff,
+	float volMaxDist
 ) {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
-	
+
 	if (x >= width || y >= height) {
 		return;
 	}
-	
+
 	int pixelIndex = (y * width + x) * 4;
 
-	float halfTanX = tanf(fov_x * 0.5f * 3.14159265f / 180.0f);
-	float halfTanY = tanf(fov_y * 0.5f * 3.14159265f / 180.0f);
+	// generate primary ray
+	float halfTanX = tanf(fov * 0.5f * 3.14159265f / 180.0f);
+	float halfTanY = tanf(fovY * 0.5f * 3.14159265f / 180.0f);
 
 	float u = (2.0f * ((float)x + 0.5f) / (float)width  - 1.0f) * halfTanX;
 	float v = (2.0f * ((float)y + 0.5f) / (float)height - 1.0f) * halfTanY;
@@ -63,55 +159,46 @@ __global__ __forceinline__ void TriangleDrawKernel(
 	float invDirY = 1.0f / (fabsf(dirY) > 1e-8f ? dirY : copysignf(1e-8f, dirY));
 	float invDirZ = 1.0f / (fabsf(dirZ) > 1e-8f ? dirZ : copysignf(1e-8f, dirZ));
 
+	// BVH traversal — find nearest triangle
 	float nearestT = 1e30f;
-	int   hitTriIdx = -1;
+	int hitTriIdx = -1;
 
-	if (numBVHNodes > 0) {
-		int stack[64];
-		int stackPtr = 0;
-		stack[stackPtr++] = 0;
+	int stack[64];
+	int stackPtr = 0;
+	stack[stackPtr++] = 0;
 
-		while (stackPtr > 0) {
-			int nodeIdx = stack[--stackPtr];
-			const cudaBVHNode_t& node = bvhNodes[nodeIdx];
+	while (stackPtr > 0) {
+		int nodeIdx = stack[--stackPtr];
+		const cudaBVHNode_t& node = bvhNodes[nodeIdx];
 
-			if (!IntersectAABB(origX, origY, origZ, invDirX, invDirY, invDirZ,
-							   node.bounds, nearestT)) {
-				continue;
-			}
-
-			if (node.primitive_count > 0) {
-				for (int i = 0; i < node.primitive_count; i++) {
-					int triIdx = triIndices[node.first_primitive + i];
-					float t = IntersectTriangle(origX, origY, origZ,
-												dirX, dirY, dirZ,
-												vertices, triangles[triIdx]);
-					if (t > 0.0f && t < nearestT) {
-						nearestT = t;
-						hitTriIdx = triIdx;
-					}
-				}
-			} else {
-				if (node.l_child >= 0 && stackPtr < 63) {
-					stack[stackPtr++] = node.l_child;
-				}
-				if (node.r_child >= 0 && stackPtr < 63) {
-					stack[stackPtr++] = node.r_child;
-				}
-			}
+		if (!IntersectAABB_Simple(origX, origY, origZ, invDirX, invDirY, invDirZ,
+								  node.bounds, nearestT)) {
+			continue;
 		}
-	} else {
-		for (int i = 0; i < numTriangles; i++) {
-			float t = IntersectTriangle(origX, origY, origZ,
-										dirX, dirY, dirZ,
-										vertices, triangles[i]);
-			if (t > 0.0f && t < nearestT) {
-				nearestT = t;
-				hitTriIdx = i;
+
+		if (node.leftChild == -1) {
+			// leaf node
+			for (int i = 0; i < node.primitiveCount; i++) {
+				int triIdx = triIndices[node.firstPrimitive + i];
+				float t = IntersectTriangle_Simple(origX, origY, origZ,
+												   dirX, dirY, dirZ,
+												   vertices, triangles[triIdx]);
+				if (t > 0.0f && t < nearestT) {
+					nearestT = t;
+					hitTriIdx = triIdx;
+				}
+			}
+		} else {
+			if (node.leftChild >= 0 && stackPtr < 63) {
+				stack[stackPtr++] = node.leftChild;
+			}
+			if (node.rightChild >= 0 && stackPtr < 63) {
+				stack[stackPtr++] = node.rightChild;
 			}
 		}
 	}
 
+	// color output — random color per triangle
 	float r, g, b;
 
 	if (hitTriIdx >= 0) {
@@ -124,20 +211,14 @@ __global__ __forceinline__ void TriangleDrawKernel(
 		g = g * 0.7f + 0.3f;
 		b = b * 0.7f + 0.3f;
 	} else {
-		r = 0.05f;
-		g = 0.05f;
-		b = 0.05f;
+		r = 0.0f;
+		g = 0.0f;
+		b = 0.0f;
 	}
 
-    // write HDR framebuffer (float4 RGBA)
+	// write HDR framebuffer (float4 RGBA)
 	framebuffer[pixelIndex + 0] = r;
 	framebuffer[pixelIndex + 1] = g;
 	framebuffer[pixelIndex + 2] = b;
 	framebuffer[pixelIndex + 3] = 1.0f;
-
-    // write LDR output buffer (RGBA8)
-	outputBuffer[pixelIndex + 0] = (unsigned char)(r * 255.0f);
-	outputBuffer[pixelIndex + 1] = (unsigned char)(g * 255.0f);
-	outputBuffer[pixelIndex + 2] = (unsigned char)(b * 255.0f);
-	outputBuffer[pixelIndex + 3] = 255;
 }

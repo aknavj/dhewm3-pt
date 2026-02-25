@@ -6,7 +6,6 @@
 
 // extern console variables
 extern idCVar r_cuDebug;
-extern idCVar r_cuRenderMode;
 
 /*
 ========================
@@ -64,12 +63,33 @@ void idCudaRenderer::EndFrame() {
 	num_triangles = h_triangles.Num();
 	num_vertices = h_vertices.Num();
 
-	BuildBVH();
+	// upload geometry to GPU first
+	if (num_triangles > 0 && num_vertices > 0) {
+		// reallocate triangle buffer if needed
+		if (num_triangles > allocatedTriangles) {
+			if (d_triangles) cudaFree(d_triangles);
+			allocatedTriangles = num_triangles + 1000;
+			cudaMalloc(&d_triangles, allocatedTriangles * sizeof(cudaTriangle_t));
+		}
+
+		CUDA_CHECK_VOID(cudaMemcpy(d_vertices, h_vertices.Ptr(),
+			num_vertices * sizeof(cudaVertex_t), cudaMemcpyHostToDevice));
+		CUDA_CHECK_VOID(cudaMemcpy(d_triangles, h_triangles.Ptr(),
+			num_triangles * sizeof(cudaTriangle_t), cudaMemcpyHostToDevice));
+	}
+
+	// build LBVH on GPU
+	FramePVStoBVH();
 
 	// upload lights
-	if (h_lights.Num() > 0) {
+	int numLightsToUpload = h_lights.Num();
+	if (numLightsToUpload > MAX_LIGHTS) {
+		common->Warning("idCudaRenderer::EndFrame(): Clamping %d lights to MAX_LIGHTS (%d)\n", numLightsToUpload, MAX_LIGHTS);
+		numLightsToUpload = MAX_LIGHTS;
+	}
+	if (numLightsToUpload > 0) {
 		CUDA_CHECK_VOID(cudaMemcpy(d_lights, h_lights.Ptr(), 
-			h_lights.Num() * sizeof(cudaLight_t), cudaMemcpyHostToDevice));
+			numLightsToUpload * sizeof(cudaLight_t), cudaMemcpyHostToDevice));
 	}
 
 	// upload materials
@@ -98,6 +118,7 @@ void idCudaRenderer::EndFrame() {
 		common->Printf("  Vertices: %d\n", num_vertices);
 		common->Printf("  Materials: %d\n", h_materials.Num());
 		common->Printf("  Lights: %d\n", h_lights.Num());
+		common->Printf("  BVH Nodes: %d\n", num_bvh_nodes);
 		common->Printf("  Kernel: %.2f ms (%.1f FPS)\n", kernel_ms, kernel_fps);
 	}
 

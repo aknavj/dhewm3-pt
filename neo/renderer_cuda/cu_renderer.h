@@ -39,19 +39,24 @@
 
 #define TILE_SIZE 16
 #define MAX_TRIANGLES 1000000
-#define MAX_TEXTURES 1024
+#define MAX_TEXTURES 2048
 #define MAX_MATERIALS 1024
-#define MAX_LIGHTS 128
+#define MAX_LIGHTS 512
 #define MAX_BVH_NODES (MAX_TRIANGLES * 2)
+
+// volumetric rendering
+#define VOLUMETRIC_STEPS 4
+#define VOLUMETRIC_DENSITY 0.01f
 
 /*
  */
 struct cudaVertex_t {
 	float position[3];
 	float normal[3];
-	float tangent[3];
-	float bitangent[3];
 	float texcoord[2];
+	float tangent[3];
+	float binormal[3];
+	float color[4];            // Vertex color RGBA
 };
 
 /*
@@ -73,55 +78,60 @@ struct cudaTexture_t {
 /*
  */
 struct cudaMaterial_t {
-    float albedo[3];
-	float specular[3];
-	float emission[3];
-	float blendColor[4];
-    int albedoTexture;
-	int normalTexture;
-	int specularTexture;
-	int emissionTexture;
-	int blendTexture;
-	int alphaMaskTexture;
-	float alphaTest;
-	int coverage; // 0 = opaque, 1 = perforated (alpha tested), 2 = translucent
-	int blendMode; // 0 = opaque, 1 = additive (ONE,ONE), 2 = alpha blend (SRC_ALPHA,ONE_MINUS_SRC_ALPHA), 3 = filter/modulate (DST_COLOR,ZERO)
+	float albedo[4];           // base color + alpha
+	float emission[3];         // emissive color (for glowing materials)
+	float metallic;            // metallic factor
+	float roughness;           // roughness factor
+	float ior;                 // index of refraction
+	float transmission;        // transmission factor (glass, etc)
+	float alphaTest;           // alpha test threshold (0 = no test, >0 = test value)
+	int blendMode;             // 0=opaque, 1=alpha_blend, 2=additive, 3=multiply
+	int useVertexColor;        // use vertex colors for tinting
+	int isAmbientOnly;         // 1=ambient-only material (no interaction stages), render as unlit overlay
+	int noShadows;             // 1=material does not cast shadows (noshadows keyword)
+	int albedoTexture;         // diffuse/base color texture index (-1 if none)
+	int normalTexture;         // normal/bump map texture index (-1 if none)
+	int specularTexture;       // specular map texture index (-1 if none)
+	float bumpScale;           // normal map intensity
+	float texTransform[6];     // 2x3 matrix: scale.x, scale.y, rotate, translate.x, translate.y, scroll_speed
+	float polygonOffset;       // depth bias for decals (negative = toward camera)
 };
 
 /*
  */
 struct cudaLight_t {
-	int type;
-    float position[3];
-	float direction[3]; 
-    float color[3];
-    float intensity;
-    float radius;
-	float area[3];
-	int textureIndex;
-	float coneAngle;
-	float coneFalloff;
+	int type;                  // 0=point, 1=directional, 2=area
+	float position[3];
+	float direction[3];        // normalized forward direction (for spotlights and directional)
+	float color[3];
+	float intensity;
+	float radius;              // Doom 3 light radius (falloff boundary)
+	float area[3];             // area light dimensions (for emissive triangle lights)
+	int textureIndex;          // light texture (-1 if none)
+	float volumetric;          // volumetric scattering intensity (0=off)
+	float coneAngle;           // spotlight half-angle in radians (0=omnidirectional)
+	float coneFalloff;         // spotlight edge softness exponent (higher=sharper edge)
 
-	// for point and projected lights
-	float lightRadius3[3];
-
-	// projected light orientation
-	float right[3];
-	float up[3];
-
-	// projected light frustum planes (4 planes × 4 components)
-	float lightProject[4][4];
+	// Doom 3 light projection planes (global space)
+	float lightProject[4][4];  // 4 planes, each (normal.xyz, distance)
 	int projectedTextureIndex;
+
+	// light extents for area light sampling (soft shadows)
+	float lightRadius3[3];     // xyz extents for area sampling
+
+	// axis vectors for projected light orientation
+	float right[3];            // light's right axis (normalized)
+	float up[3];               // light's up axis (normalized)
 };
 
 /*
  */
 struct cudaBVHNode_t {
-	float bounds[6];
-	int l_child;
-	int r_child;
-	int first_primitive;
-	int primitive_count;
+	float bounds[6];  // min/max xyz
+	int leftChild;    // -1 if leaf
+	int rightChild;   // -1 if leaf
+	int firstPrimitive;  // for leaf nodes
+	int primitiveCount;  // for leaf nodes
 };
 
 /*
@@ -129,13 +139,23 @@ struct cudaBVHNode_t {
 struct cudaRay_t {
 	float origin[3];
 	float direction[3];
+	float tMin;
+	float tMax;
 };
 
 /*
  */
 struct cudaHitInfo_t {
+	bool hit;
+	float t;
 	float position[3];
 	float normal[3];
+	float tangent[3];
+	float binormal[3];
+	float texcoord[2];
+	float barycentrics[3];  // barycentric coordinates (w, u, v) for vertex interpolation
+	int materialIndex;
+	int triangleIndex;
 };
 
 #ifndef __CUDACC__
@@ -161,7 +181,7 @@ public:
 	void			PrintDeviceInfo();
 
     // texture management
-    int             AddMaterial(const idMaterial* material, const float* shaderRegisters = NULL);
+    int             GetOrSetMaterial(const idMaterial* material, const float* shaderRegisters = NULL);
     void            SetMaterial(int index, const idMaterial* material, const float* shaderRegisters = NULL);
     int             AddTexture(const idImage* image);
 
@@ -185,6 +205,10 @@ public:
 	void			RenderView(const renderView_t* renderView);
 	void			CopyToBackbuffer(unsigned char* dest, int destWidth, int destHeight);
 
+	// accumulation
+	void			ResetAccumulation();
+	int				GetAccumulatedFrames() const { return accum_frame; }
+
 private:
 	void			Alloc();
 	void			Free();
@@ -202,13 +226,20 @@ private:
 	float*			d_framebuffer;
 	unsigned char*	d_outputBuffer;
 
+	// LBVH GPU temporaries
+	unsigned int*	d_mortonCodes;
+	int*			d_sortedIndices;
+	int*			d_parents;           // parent pointer per node (2N-1)
+	int*			d_atomicCounters;    // one per internal node (N-1)
+	int				allocatedLBVHSize;   // number of triangles the temp buffers can handle
+	int				allocatedTriangles;  // allocated GPU triangle buffer size
+	int				allocatedBVHNodes;   // allocated GPU BVH buffer size
+	int				allocatedTriIndices; // allocated GPU triIndices buffer size
     // host memory
 	idList<cudaVertex_t>	h_vertices;
 	idList<cudaTriangle_t>	h_triangles;
     idList<cudaMaterial_t>	h_materials;
     idList<cudaLight_t>		h_lights;
-	idList<cudaBVHNode_t>	h_bvhNodes;
-	idList<int>				h_bvhTriIndices;
 	unsigned char*          h_outputPixels;
 	size_t                  h_outputPixelsSize;
 
@@ -257,8 +288,13 @@ private:
 	int			    height;
 	int				renderWidth;
 	int				renderHeight;
+	int				prevRenderWidth;
+	int				prevRenderHeight;
 
 	bool			cu_context_ok;
+
+	// CUDA stream
+	cudaStream_t	stream;
 
     // kernel timing
 	cudaEvent_t		timer_start;
@@ -276,29 +312,78 @@ extern idCudaRenderer* g_cuRenderer;
 extern "C" {
 #endif
 
-void CUDA_LaunchRenderView(
+// primary ray generation and path tracing kernel
+void LaunchPathTracingKernel(
 	const cudaVertex_t* vertices,
 	const cudaTriangle_t* triangles,
-	const int *triIndices,
-    const cudaMaterial_t* materials,
-    const cudaTexture_t* textures,
-    const cudaLight_t* lights,
-    int numLights,
 	const cudaBVHNode_t* bvhNodes,
-	int numBVHNodes,
+	const int* triIndices,
+	const cudaMaterial_t* materials,
+	const cudaTexture_t* textures,
+	const cudaLight_t* lights,
+	int numLights,
+	int renderMode,
 	float* framebuffer,
-	unsigned char* outputBuffer,
 	int width,
 	int height,
+	const float* cameraPos,
+	const float* cameraForward,
+	const float* cameraRight,
+	const float* cameraUp,
+	float fov,
+	float fovY,
+	int samplesPerPixel,
+	int maxDepth,
+	int maxLightSamples,
+	int frameIndex,
+	float emissionBoost,
+	float indirectProb,
+	int rrEnabled,
+	int rrMinBounces,
+	float rrSurvivalMin,
+	float earlyTermThreshold,
+	float fireflyClamp,
+	float throughputClamp,
+	float rayOffset,
+	float specularBoost,
+	float skyIntensity,
+	const float* skyColorZenith,
+	const float* skyColorHorizon,
+	const float* skyColorGround,
+	float volumetricDensity,
+	int volumetricSteps,
+	float volumetricAnisotropy,
+	float volFalloff,
+	float volMaxDist,
+	float softShadowScale,
+	cudaStream_t stream
+);
+
+// tone mapping and output conversion kernel
+void LaunchToneMappingKernel(
+	const float* hdrBuffer,
+	unsigned char* ldrBuffer,
+	int width,
+	int height,
+	float exposure,
+	float gamma,
+	int toneMapMode,
+	int frameCount,
+	cudaStream_t stream
+);
+
+// GPU LBVH construction
+void LaunchBuildLBVH(
+	const cudaTriangle_t* d_triangles,
 	int numTriangles,
-	const float* cam_pos,
-	const float* cam_forward,
-	const float* cam_right,
-	const float* cam_up,
-	float fov_x,
-	float fov_y,
-	int renderMode,
-	unsigned int frameNumber
+	cudaBVHNode_t* d_bvhNodes,
+	int* d_triIndices,
+	unsigned int* d_mortonCodes,
+	int* d_sortedIndices,
+	int* d_parents,
+	int* d_atomicCounters,
+	const float* sceneBounds,
+	cudaStream_t stream
 );
 
 #ifdef __cplusplus
