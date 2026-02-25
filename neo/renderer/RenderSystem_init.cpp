@@ -222,6 +222,8 @@ idCVar r_showOverDraw( "r_showOverDraw", "0", CVAR_RENDERER | CVAR_INTEGER, "1 =
 idCVar r_lockSurfaces( "r_lockSurfaces", "0", CVAR_RENDERER | CVAR_BOOL, "allow moving the view point without changing the composition of the scene, including culling" );
 idCVar r_useEntityCallbacks( "r_useEntityCallbacks", "1", CVAR_RENDERER | CVAR_BOOL, "if 0, issue the callback immediately at update time, rather than defering" );
 
+idCVar r_frameStats( "r_frameStats", "0", CVAR_RENDERER | CVAR_BOOL, "print per-frame statistics: frame number, time, FPS" );
+
 idCVar r_showSkel( "r_showSkel", "0", CVAR_RENDERER | CVAR_INTEGER, "draw the skeleton when model animates, 1 = draw model with skeleton, 2 = draw skeleton only", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
 idCVar r_jointNameScale( "r_jointNameScale", "0.02", CVAR_RENDERER | CVAR_FLOAT, "size of joint names when r_showskel is set to 1" );
 idCVar r_jointNameOffset( "r_jointNameOffset", "0.5", CVAR_RENDERER | CVAR_FLOAT, "offset of joint names when r_showskel is set to 1" );
@@ -868,6 +870,11 @@ void R_InitOpenGL( void ) {
 	// select which renderSystem we are going to use
 	r_renderer.SetModified();
 	tr.SetBackEndRenderer();
+
+#ifdef HAVE_CUDA
+	// initialize CUDA path tracer if enabled
+	RB_CUDA_Init();
+#endif
 
 	// allocate the frame data, which may be more if smp is enabled
 	R_InitFrameData();

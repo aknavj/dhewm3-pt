@@ -64,6 +64,7 @@ option(REPRODUCIBLE_BUILD "Replace __DATE__ and __TIME__ by hardcoded values for
 option(TRACY		"Build and integrate the Tracy profiler, requires HARDLINK_GAME" OFF)
 
 option(HARDLINK_GAME "Compile gamecode into executable (no game DLLs)" OFF)
+option(CUDA_PATHTRACER "Build with CUDA path tracer support" OFF)
 
 if(NOT MSVC) # GCC/clang or compatible, hopefully
 	option(FORCE_COLORED_OUTPUT "Always produce ANSI-colored compiler warnings/errors (GCC/Clang only; esp. useful with ninja)." OFF)
@@ -73,6 +74,20 @@ if(NOT MSVC) # GCC/clang or compatible, hopefully
 	if(UBSAN AND NOT HARDLINK_GAME)
 		message(STATUS "UBSAN requires linking the gamecode into the executable, will enable HARDLINK_GAME")
 		set(HARDLINK_GAME ON)
+	endif()
+endif()
+
+# CUDA path tracer detection
+set(HAVE_CUDA OFF)
+if(CUDA_PATHTRACER)
+	include(CheckLanguage)
+	check_language(CUDA)
+	if(CMAKE_CUDA_COMPILER)
+		enable_language(CUDA)
+		set(HAVE_CUDA ON)
+		message(STATUS "CUDA path tracer enabled - compiler: ${CMAKE_CUDA_COMPILER}")
+	else()
+		message(WARNING "CUDA_PATHTRACER requested but no CUDA compiler found")
 	endif()
 endif()
 
@@ -662,6 +677,35 @@ function(add_globbed_headers SRCLIST PATHPREFIX)
 	file(GLOB_RECURSE tmp_hdrs RELATIVE "${CMAKE_SOURCE_DIR}" "${PATHPREFIX}/*.h")
 	set(${SRCLIST} ${tmp_hdrs} ${${SRCLIST}} PARENT_SCOPE)
 endfunction()
+
+
+# Add CUDA path tracer source files if enabled
+if(HAVE_CUDA)
+	add_definitions(-DHAVE_CUDA)
+
+	list(APPEND src_renderer
+		renderer_cuda/cu_renderer.cpp
+		renderer_cuda/cu_renderer_frame.cpp
+		renderer_cuda/cu_renderer_geometry.cpp
+		renderer_cuda/cu_renderer_texture.cpp
+		renderer_cuda/cu_renderer_material.cpp
+		renderer_cuda/cu_renderer_light.cpp
+		renderer_cuda/cu_renderer_bvh.cpp
+		renderer_cuda/tr_backend_cuda.cpp
+		renderer_cuda/tr_render_cu_stats.cpp
+		renderer_cuda/tr_render_gl_stats.cpp
+	)
+
+	# CUDA kernel file
+	set(src_renderer_cuda
+		renderer_cuda/cu_renderer_main.cu
+		renderer_cuda/cu_renderer_lbvh.cu
+	)
+
+	# Set CUDA compilation flags
+	set(CMAKE_CUDA_STANDARD 17)
+	set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90")
+endif()
 
 add_globbed_headers(src_renderer "renderer")
 
@@ -1306,6 +1350,7 @@ if(CORE)
 		${src_sys_core}
 		${src_imgui}
 		${src_editor_tools}
+		${src_renderer_cuda}
 	)
 	
 	if(MSVC AND CMAKE_MAJOR_VERSION GREATER 3 OR ( CMAKE_MAJOR_VERSION EQUAL 3 AND CMAKE_MINOR_VERSION GREATER_EQUAL 6 ))
@@ -1333,6 +1378,12 @@ endif()
 		${SDLx_LIBRARY}
 		${sys_libs}
 	)
+
+	if(HAVE_CUDA)
+		set_target_properties(${DHEWM3BINARY} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+		target_link_libraries(${DHEWM3BINARY} ${CUDA_LIBRARIES})
+		target_include_directories(${DHEWM3BINARY} PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+	endif()
 
 	if(NOT APPLE AND NOT WIN32)
 		install(TARGETS ${DHEWM3BINARY}
